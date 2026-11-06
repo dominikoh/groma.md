@@ -22,11 +22,6 @@ export interface WorkPin {
   colour: string
 }
 
-/** Two letters of the handle, for the badge. */
-export function monogram(assignee: string): string {
-  return assignee.replace(/^@/, '').slice(0, 2).toUpperCase()
-}
-
 const taskNumber = (id: string): number => Number.parseFloat(id.replace(/^\D+/, ''))
 
 /** The elements a task touches, each once: those whose code holds one of its modified files, newest file first, then those it references. */
@@ -52,10 +47,28 @@ export function elementWorkGroups(
   elementId: string,
   world: Pick<ArchitectureGraph, 'elements'>,
 ): ElementWorkGroup[] {
+  return workGroups(work, item => touchedElements(item, world).includes(elementId))
+}
+
+/** The work on an element or anything inside it: a system or container lists the tasks of its parts too. */
+export function subtreeWorkGroups(
+  work: WorkSnapshot,
+  elementId: string,
+  world: Pick<ArchitectureGraph, 'elements'>,
+): ElementWorkGroup[] {
+  const parent = new Map(world.elements.map(element => [element.representationId, element.parent]))
+  const within = (id: string): boolean => {
+    for (let current: string | null | undefined = id; current; current = parent.get(current)) if (current === elementId) return true
+    return false
+  }
+  return workGroups(work, item => touchedElements(item, world).some(within))
+}
+
+function workGroups(work: WorkSnapshot, touches: (item: WorkItem) => boolean): ElementWorkGroup[] {
   const grouped: Record<WorkStage, WorkItem[]> = { todo: [], progress: [], done: [] }
   const terminal = work.statuses.at(-1)
   for (const item of work.items) {
-    if (!touchedElements(item, world).includes(elementId)) continue
+    if (!touches(item)) continue
     const stage = item.status === work.defaultStatus
       ? 'todo'
       : item.status === terminal ? 'done' : 'progress'

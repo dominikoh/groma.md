@@ -40,6 +40,11 @@ interface Constraint {
 
 const movable = (item: Item): boolean => item.run !== undefined
 
+/** Runs of routes that share a source or a target may lie on one line: those routes join there. */
+function joined(ends: readonly { source: RouteEnd, target: RouteEnd }[], a: number, b: number): boolean {
+  return a !== b && (ends[a]!.source.key === ends[b]!.source.key || ends[a]!.target.key === ends[b]!.target.key)
+}
+
 /**
  * Two runs constrain each other when they share a stretch, or come within the minimum spacing of sharing one:
  * otherwise the other axis could slide them into each other.
@@ -115,7 +120,8 @@ function constraintsOf(routes: readonly (readonly Point[])[], items: readonly It
     if (!pair) return false
     const [left, right] = pair[0] === items[a] ? [a, b] : [b, a]
     constraints.set(`${left}:${right}`, {
-      left, right, spaced: items[left]!.run !== undefined && items[right]!.run !== undefined && items[left]!.run!.route !== items[right]!.run!.route,
+      left, right, spaced: items[left]!.run !== undefined && items[right]!.run !== undefined && items[left]!.run!.route !== items[right]!.run!.route
+        && !joined(ends, items[left]!.run!.route, items[right]!.run!.route),
     })
     return true
   }
@@ -372,14 +378,14 @@ function place(routes: Point[][], items: readonly Item[], positions: readonly nu
 
 /** Runs of different routes that share a stretch yet ended up closer than the least spacing without a constraint. */
 function unseparated(routes: readonly (readonly Point[])[], items: readonly Item[], constraints: readonly Constraint[],
-  positions: readonly number[]): Constraint[] {
+  positions: readonly number[], ends: readonly { source: RouteEnd, target: RouteEnd }[]): Constraint[] {
   const linked = new Set(constraints.map(({ left, right }) => `${left}:${right}`))
   const runs = items.flatMap((item, index) => item.run ? [index] : [])
   const missing: Constraint[] = []
   for (const [position, a] of runs.entries()) {
     for (const b of runs.slice(position + 1)) {
       const [first, second] = [items[a]!, items[b]!]
-      if (first.run!.route === second.run!.route || Math.abs(positions[a]! - positions[b]!) >= ROUTE_SPACING - EPSILON
+      if (first.run!.route === second.run!.route || joined(ends, first.run!.route, second.run!.route) || Math.abs(positions[a]! - positions[b]!) >= ROUTE_SPACING - EPSILON
         || !near(first, second) || linked.has(`${a}:${b}`) || linked.has(`${b}:${a}`)) continue
       const [left, right] = across(routes, first, second) <= 0 ? [a, b] : [b, a]
       missing.push({ left, right, spaced: true })
@@ -403,7 +409,7 @@ function nudgeAxis(routes: Point[][], boxes: readonly Box[], ends: readonly { so
     const order = topologicalOrder(constraints, links)
     const gaps = spacings(items, constraints, links, order)
     const positions = settle(solve(items, constraints, links, order, gaps), items, constraints, links, order, gaps)
-    const missing = unseparated(routes, items, constraints, positions)
+    const missing = unseparated(routes, items, constraints, positions, ends)
     if (missing.length === 0) {
       place(routes, items, positions)
       return

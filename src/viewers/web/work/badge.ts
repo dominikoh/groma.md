@@ -1,12 +1,3 @@
-import { monogram } from '../../../work/pins.ts'
-import type { WorkPin } from '../../../work/pins.ts'
-import { MARKS } from '../atoms/marks.ts'
-import { BACKLOG_MARK } from './backlog-mark.ts'
-
-/** The ring's radius in the badge's 40 px box. */
-const RING_RADIUS = 18
-const RING_LENGTH = 2 * Math.PI * RING_RADIUS
-
 /** How long a visible work badge takes to turn into its Done face. */
 export const WORK_BADGE_FLIP_MS = 500
 export const WORK_BADGE_HOLD_MS = 2500
@@ -39,30 +30,3 @@ export const workBadgeCss = `
     to { transform: rotateY(180deg); }
   }
 `
-
-/** A ringed work badge with a mark on the front and a checkmark on the back. */
-export const WORK_BADGE = `<div class="badge"><svg class="ring" viewBox="0 0 40 40"><circle class="track" cx="20" cy="20" r="${RING_RADIUS}"/><circle class="done" cx="20" cy="20" r="${RING_RADIUS}"/></svg>`
-  + '<div class="card"><div class="face front"></div><div class="face back">✓</div></div></div>'
-
-/** Keys whose existing work changed from running to Done in this update. */
-export function finishingWorkKeys(previous: readonly WorkPin[], next: readonly WorkPin[]): Set<string> {
-  const wasDone = new Map(previous.map(pin => [pin.key, pin.terminal]))
-  return new Set(next
-    .filter(pin => pin.terminal && wasDone.get(pin.key) === false)
-    .map(pin => pin.key))
-}
-
-/** Fills a work badge with its state, assignee mark and acceptance-criteria progress. */
-export function fillWorkBadge(host: HTMLElement, pin: WorkPin, finishingAt?: number): void {
-  const finishing = finishingAt !== undefined
-  if (finishing && !host.classList.contains('work-finishing')) {
-    host.style.setProperty('--work-finish-delay', `${finishingAt - Date.now()}ms`)
-  }
-  host.classList.toggle('work-done', pin.terminal)
-  host.classList.toggle('work-finishing', finishing)
-  host.querySelector<HTMLElement>('.face.front')!.innerHTML = pin.assignee === null
-    ? BACKLOG_MARK
-    : MARKS[pin.assignee.replace(/^@/, '')] ?? monogram(pin.assignee)
-  host.querySelector<SVGCircleElement>('.ring .done')!.style.strokeDasharray =
-    `${(pin.total === 0 ? 0 : pin.done / pin.total) * RING_LENGTH} ${RING_LENGTH}`
-}

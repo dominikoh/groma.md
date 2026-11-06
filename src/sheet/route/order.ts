@@ -47,6 +47,8 @@ export class LineRuns {
    * round it, 1 when the new run keeps to its left.
    */
   carry: Map<number, number> | undefined
+  /** Placed routes the new run joins rather than crosses: those sharing its source or its target. */
+  joined: (route: number) => boolean = () => false
 
   add(route: number, runs: readonly LineRun[]): void {
     for (const run of runs) {
@@ -66,7 +68,7 @@ export class LineRuns {
     const placed = this.runs[run.line]
     if (!placed) return 0
     let count = 0
-    for (const other of placed) count += this.crossing(run, other, ends, carried)
+    for (const other of placed) if (!this.joined(other.route)) count += this.crossing(run, other, ends, carried)
     return count
   }
 

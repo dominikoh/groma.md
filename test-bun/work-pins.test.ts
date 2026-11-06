@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'bun:test'
 
 import type { WorkItem, WorkSnapshot } from '../src/types.ts'
-import { elementWorkGroups, pinsOf, touchedElements } from '../src/work/pins.ts'
+import { elementWorkGroups, pinsOf, subtreeWorkGroups, touchedElements } from '../src/work/pins.ts'
 import { box, worldOf } from './helpers.ts'
 
 const unit = { x: 0, y: 0, width: 1, height: 1 }
@@ -71,6 +71,13 @@ test.concurrent('an element receives default, intermediate, and terminal work gr
     ['done', ['TASK-3']],
   ])
   assert.deepEqual(elementWorkGroups(work, 'observed:shop', world), [])
+  // A system lists the work of everything inside it; a container keeps only its own.
+  assert.deepEqual(subtreeWorkGroups(work, 'observed:shop', world).map(group => [group.stage, group.items.map(task => task.id)]), [
+    ['todo', ['TASK-1']],
+    ['progress', ['TASK-2', 'TASK-4']],
+    ['done', ['TASK-3']],
+  ])
+  assert.deepEqual(subtreeWorkGroups(work, 'observed:api', world), elementWorkGroups(work, 'observed:api', world))
 })
 
 test.concurrent('every assignee and task pair gets one ordered pin with task progress', () => {

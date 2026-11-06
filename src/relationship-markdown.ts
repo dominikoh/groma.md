@@ -14,6 +14,17 @@ import type {
 } from './types.ts'
 
 const columns = ['Source', 'Target', 'Description', 'Technology']
+
+/**
+ * Actors and external systems have no source files, so relationships name them by concept ID. A container that owns
+ * no code and holds no children, such as a database, an object store or an application built from another
+ * repository, has no source file either; it is named by concept ID the same way.
+ */
+export function declaredEndpoint(element: ArchitectureElement | undefined, elements: readonly ArchitectureElement[]): boolean {
+  if (!element) return false
+  if (element.kind === 'actor' || element.external) return true
+  return element.kind === 'container' && element.code.length === 0 && !elements.some(child => child.parentId === element.id)
+}
 type Invalid = (code: string, filename: string, message: string) => never
 
 
@@ -44,12 +55,13 @@ function readRow(
   authored: boolean,
   byDocument: ReadonlyMap<string, ArchitectureElement>,
   invalid: Invalid,
+  elements: readonly ArchitectureElement[],
 ): RelationshipConnection {
   const cells = (row.slice(2) as MarkdownNode[]).filter((node): node is MarkdownElement => Array.isArray(node) && node[0] === 'td')
   if (cells.length !== 4) invalid('INVALID_RELATIONSHIP', filename, 'relationship row must contain four cells')
   const source = endpoint(cells[0], filename, byDocument, invalid)
   const target = endpoint(cells[1], filename, byDocument, invalid)
-  const declaredConcept = [source, target].some(end => end.element?.kind === 'actor' || end.element?.external === true)
+  const declaredConcept = [source, target].some(end => declaredEndpoint(end.element, elements))
   if (!declaredConcept && (!source.file || !target.file)) {
     invalid('INVALID_RELATIONSHIP', filename, 'code relationships require source-file endpoints')
   }
@@ -96,7 +108,7 @@ export function storedRelationships(
   const pairs = new Set<string>()
   for (const document of documents) {
     for (const { row, status, authored } of rows(document, invalid)) {
-      const connection = readRow(row, document.sourceFilename, status, authored, byDocument, invalid)
+      const connection = readRow(row, document.sourceFilename, status, authored, byDocument, invalid, elements)
       const pair = `${connection.authored}\0${connection.source}\0${connection.target}`
       if (pairs.has(pair)) invalid('INVALID_RELATIONSHIP', document.sourceFilename, `each ordered endpoint pair has one ${connection.authored ? 'authored' : 'derived'} row`)
       pairs.add(pair)

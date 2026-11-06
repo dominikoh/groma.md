@@ -57,7 +57,7 @@ export function routeAll(endpoints: ReadonlyMap<string, Endpoint>, requests: rea
   if (requests.length === 0) return []
   const choices = portChoices(endpoints, requests)
   const graph = routeGraph(endpoints, choices)
-  const paths = new RoutePaths(graph, choices)
+  const paths = new RoutePaths(graph, choices, requests)
   const order = routeOrder(requests)
   for (const index of order) {
     if (!paths.route(index)) throw new Error(`Could not route relationship ${requests[index]!.id}`)

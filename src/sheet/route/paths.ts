@@ -1,6 +1,6 @@
-import { BEND, CROSSING, CROWDING, OTHER_WALL, OVERFLOW } from './costs.ts'
+import { BEND, CROSSING, CROWDING, JOINED_LENGTH, OTHER_WALL, OVERFLOW } from './costs.ts'
 import { EAST, NORTH, SOUTH, WEST, exitDirection, type RouteGraph } from './graph.ts'
-import type { Point, PortPair } from './geometry.ts'
+import type { Point, PortPair, RouteRequest } from './geometry.ts'
 import { LineRuns, type LineRun, type RunEnds } from './order.ts'
 import type { PortChoice, PortChoices } from './ports.ts'
 import { SearchQueue } from './queue.ts'
@@ -95,10 +95,19 @@ export class RoutePaths {
   private goalRun: Uint32Array
   private run = 0
   private queue = new SearchQueue()
+  /** The routes on each edge, so a route can tell the routes it joins from the ones it crowds. */
+  private edgeRoutes = new Map<number, number[]>()
+  /** The route being searched or priced. */
+  private current = -1
+  /** Whether two routes share a source or a target and so may run as one line. */
+  private joinsRoute: (a: number, b: number) => boolean
 
-  constructor(graph: RouteGraph, choices: readonly PortChoices[]) {
+  constructor(graph: RouteGraph, choices: readonly PortChoices[], requests: readonly Pick<RouteRequest, 'source' | 'target'>[] = []) {
     this.graph = graph
     this.choices = choices
+    this.joinsRoute = (a, b) => a !== b && requests[a] !== undefined && requests[b] !== undefined
+      && (requests[a]!.source === requests[b]!.source || requests[a]!.target === requests[b]!.target)
+    this.placed.joined = route => this.joinsRoute(this.current, route)
     this.loads = new Uint16Array(graph.x.length * 2)
     this.straight = new Uint16Array(graph.x.length * 2)
     const walls = choices.flatMap(request => [...request.source, ...request.target].map(choice => choice.wall))
@@ -130,6 +139,7 @@ export class RoutePaths {
 
   /** Places the route's first path; false when it has none, even through full channels. */
   route(index: number): boolean {
+    this.current = index
     let path = this.search(index, Infinity)
     if (!path) {
       this.overfill = true
@@ -143,6 +153,7 @@ export class RoutePaths {
 
   /** Reroutes one path with every other path in place, keeping it unless a cheaper one exists. */
   improve(index: number): void {
+    this.current = index
     const original = this.paths.get(index)!
     this.take(index, original, -1)
     const better = this.search(index, this.cost(original, index))
@@ -152,7 +163,7 @@ export class RoutePaths {
   /** Adds or removes a path: its edges, the nodes it runs straight through, its straight stretches, and its walls other than the preferred ones. */
   private take(index: number, path: Path, change: number): void {
     if (change > 0) this.paths.set(index, path)
-    this.occupy(path.nodes, change)
+    this.occupy(index, path.nodes, change)
     if (change > 0) this.placed.add(index, this.runsOf(path.nodes))
     else this.placed.remove(index, this.runsOf(path.nodes))
     for (const choice of [this.choices[index]!.source[path.source]!, this.choices[index]!.target[path.target]!]) {
@@ -175,11 +186,14 @@ export class RoutePaths {
     throw new Error('Path nodes are not neighbours')
   }
 
-  private occupy(nodes: readonly number[], change: number): void {
+  private occupy(route: number, nodes: readonly number[], change: number): void {
     let previous = -1
     for (let index = 1; index < nodes.length; index += 1) {
       const direction = this.directionBetween(nodes[index - 1]!, nodes[index]!)
-      this.loads[this.edge(nodes[index - 1]!, direction)]! += change
+      const edge = this.edge(nodes[index - 1]!, direction)
+      this.loads[edge]! += change
+      const on = this.edgeRoutes.get(edge) ?? []
+      this.edgeRoutes.set(edge, change > 0 ? [...on, route] : on.filter(other => other !== route))
       if (direction === previous) this.straight[nodes[index - 1]! * 2 + axisOf(direction)]! += change
       previous = direction
     }
@@ -189,12 +203,25 @@ export class RoutePaths {
     return Math.abs(this.graph.x[to]! - this.graph.x[from]!) + Math.abs(this.graph.y[to]! - this.graph.y[from]!)
   }
 
-  /** Routes along an edge with one more, counting parallel lines in the same channel. */
+  /** Routes on the edge that the current route joins. */
+  private joinedOn(edge: number): number {
+    let count = 0
+    for (const route of this.edgeRoutes.get(edge) ?? []) if (this.joinsRoute(this.current, route)) count += 1
+    return count
+  }
+
+  /** Routes along an edge with one more, counting parallel lines in the same channel but not the routes it joins. */
   private load(edge: number): number {
-    let load = this.loads[edge]! + 1
+    let load = this.loads[edge]! + 1 - this.joinedOn(edge)
     const beside = this.graph.beside[edge]
-    if (beside) for (const other of beside) load += this.loads[other]!
+    if (beside) for (const other of beside) load += this.loads[other]! - this.joinedOn(other)
     return load
+  }
+
+  /** The length a move pays: a stretch a joined route already takes costs less, so joined routes merge early. */
+  private length(from: number, direction: number, to: number): number {
+    const step = this.step(from, to)
+    return this.joinedOn(this.edge(from, direction)) > 0 ? step * JOINED_LENGTH : step
   }
 
   /**
@@ -258,7 +285,7 @@ export class RoutePaths {
    */
   private moveCost(node: number, heading: number, join: number, before: number, carried: ReadonlyMap<number, number> | undefined,
     direction: number, to: number, load?: number): number {
-    const base = this.step(node, to) + this.crowding(node, direction, load)
+    const base = this.length(node, direction, to) + this.crowding(node, direction, load)
     // Going straight crosses the routes that run straight through the node on the other axis.
     if (direction === heading) return base + CROSSING * this.straight[node * 2 + (axisOf(heading) ^ 1)]!
     return base + BEND + CROSSING * this.stretchCrossings(join, node, heading, before, direction, carried)
@@ -274,7 +301,7 @@ export class RoutePaths {
     const source = this.choices[index]!.source[path.source]!
     let heading = exitDirection[source.port.side]
     let total = wallCost(source) + wallCost(this.choices[index]!.target[path.target]!)
-      + this.step(nodes[0]!, nodes[1]!) + this.crowding(nodes[0]!, heading)
+      + this.length(nodes[0]!, heading, nodes[1]!) + this.crowding(nodes[0]!, heading)
     let join = nodes[0]!
     let before = -1
     let carried: ReadonlyMap<number, number> | undefined
@@ -363,7 +390,7 @@ export class RoutePaths {
     const load = this.open(start, exit, index)
     if (load < 0) return
     const first = this.graph.next[start * 4 + exit]!
-    const cost = wallCost(source) + this.step(start, first) + this.crowding(start, exit, load)
+    const cost = wallCost(source) + this.length(start, exit, first) + this.crowding(start, exit, load)
       + (this.isGoal(first) ? this.arrival(first, exit, start, -1, undefined) : 0)
     const state = stateOf(first, exit, 0)
     const estimate = this.estimate(first, exit)

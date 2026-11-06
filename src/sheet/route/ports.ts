@@ -251,24 +251,30 @@ function distributeClearPorts(
   return groups
 }
 
+/**
+ * Routes that leave one wall share one port, and so do routes that enter it: they leave or arrive as one line and part
+ * only where their ways do. Leaving and arriving keep separate ports, ordered along the wall by their lanes.
+ */
 function pairsFrom(groups: ReadonlyMap<string, EndpointCandidate[]>): Map<string, Partial<PortPair>> {
   const pairs = new Map<string, Partial<PortPair>>()
   for (const group of groups.values()) {
     group.sort((a, b) => laneCoordinate(a) - laneCoordinate(b) || a.request.id.localeCompare(b.request.id))
-    for (const [index, candidate] of group.entries()) {
-      const pair = pairs.get(candidate.request.id) ?? {}
-      pair[candidate.role] = portAt(
-        candidate.endpoint,
-        candidate.side,
-        portShare(index, group.length),
-      )
-      pairs.set(candidate.request.id, pair)
+    const lane = (members: readonly EndpointCandidate[]): number =>
+      members.reduce((total, candidate) => total + laneCoordinate(candidate), 0) / members.length
+    const slots = [...Map.groupBy(group, candidate => candidate.role).values()]
+      .sort((a, b) => lane(a) - lane(b) || a[0]!.request.id.localeCompare(b[0]!.request.id))
+    for (const [index, slot] of slots.entries()) {
+      for (const candidate of slot) {
+        const pair = pairs.get(candidate.request.id) ?? {}
+        pair[candidate.role] = portAt(candidate.endpoint, candidate.side, portShare(index, slots.length))
+        pairs.set(candidate.request.id, pair)
+      }
     }
   }
   return pairs
 }
 
-/** Distributes distinct wall ports across each endpoint before routing. */
+/** Assigns wall ports before routing: one port per endpoint wall for its leaving routes and one for its arriving routes. */
 export function assignFixedPorts(
   endpoints: ReadonlyMap<string, Endpoint>,
   requests: readonly RouteRequest[],

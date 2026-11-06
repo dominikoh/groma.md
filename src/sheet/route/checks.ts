@@ -9,8 +9,13 @@ function closeLength(a: Run, b: Run, spacing: number): number {
   return length < EPSILON ? 0 : length
 }
 
+/** Two routes sharing a source or a target may run as one line: they join, they do not overlap. */
+export function joinedRoutes(a: Pick<FlatRoute, 'id' | 'source' | 'target'>, b: Pick<FlatRoute, 'id' | 'source' | 'target'>): boolean {
+  return a.id !== b.id && (a.source === b.source || a.target === b.target)
+}
+
 /**
- * Measures the length of parallel runs closer than `spacing` to another route: by default the least spacing, where
+ * Measures the length of parallel runs closer than `spacing` to another route that it does not join: by default the least spacing, where
  * strokes would share or visually overlap. It reuses the runs of the routes that do not change; the changed routes are
  * the touching ones, so a changed run and an unchanged run always belong to different routes.
  */
@@ -19,14 +24,18 @@ export function sharedPathMeasure(
   touchingRouteIds: ReadonlySet<string>,
   spacing = ROUTE_SPACING,
 ): (changedRoutes: readonly FlatRoute[]) => number {
-  const unchanged = runsOf(routes.filter(route => !touchingRouteIds.has(route.id)).map(route => route.points))
+  const kept = routes.filter(route => !touchingRouteIds.has(route.id))
+  const unchanged = runsOf(kept.map(route => route.points))
   return changedRoutes => {
     const changed = runsOf(changedRoutes.map(route => route.points))
     let length = 0
-    for (const a of changed) for (const b of unchanged) length += closeLength(a, b, spacing)
+    for (const a of changed) {
+      for (const b of unchanged) if (!joinedRoutes(changedRoutes[a.route]!, kept[b.route]!)) length += closeLength(a, b, spacing)
+    }
     for (let left = 0; left < changed.length; left += 1) {
       for (let right = left + 1; right < changed.length; right += 1) {
-        if (changed[left]!.route !== changed[right]!.route) length += closeLength(changed[left]!, changed[right]!, spacing)
+        const [a, b] = [changed[left]!, changed[right]!]
+        if (a.route !== b.route && !joinedRoutes(changedRoutes[a.route]!, changedRoutes[b.route]!)) length += closeLength(a, b, spacing)
       }
     }
     return length

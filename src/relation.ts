@@ -2,13 +2,13 @@ import { buildArchitectureModel } from './architecture-model.ts'
 import { loadArchitecture } from './architecture-reader.ts'
 import { resolveFlows } from './flow-model.ts'
 import { requireText } from './naming.ts'
-import { storedRelationships, type StoredRelationship } from './relationship-markdown.ts'
+import { declaredEndpoint, storedRelationships, type StoredRelationship } from './relationship-markdown.ts'
 import { placeRelationships, saveRelationships } from './relationship-storage.ts'
 import { sourceIndex } from './source-index.ts'
 import type { ArchitectureElement, RelationshipConnection, ElementStatus } from './types.ts'
 import { checkEdit, type EditValues } from './authoring-conflict.ts'
 
-/** Code interactions use repository-relative files; actor/external declarations may use concept IDs. */
+/** Code interactions use repository-relative files; actors, externals and code-free leaf containers use concept IDs. */
 export interface RelationEnds {
   source: string
   target: string
@@ -41,7 +41,7 @@ async function loadEnds(repositoryRoot: string, input: RelationEnds): Promise<En
   if (!source) throw new Error(`unknown source "${input.source}"`)
   const target = index.owner(input.target) ?? index.resolve(input.target)
   if (!target) throw new Error(`unknown target "${input.target}"`)
-  const declaredConcept = [source, target].some(element => element.kind === 'actor' || element.external)
+  const declaredConcept = [source, target].some(element => declaredEndpoint(element, model.elements))
   if (!declaredConcept && (!index.byFile.has(input.source) || !index.byFile.has(input.target))) {
     throw new Error('code relationships require source-file endpoints')
   }

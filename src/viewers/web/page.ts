@@ -21,7 +21,7 @@ import { creditsControl, creditsCss } from './chrome/credits.ts'
 import { editorCss } from './editing/gestures.ts'
 import { emptyState, emptyStateCss } from './chrome/empty.ts'
 import { mapDebugCss } from './chrome/map-debug.ts'
-import { mapViewControl, mapViewCss } from './chrome/map-view.ts'
+import { mapLevelControl, mapViewControl, mapViewCss } from './chrome/map-view.ts'
 import { c4FilterControl, c4FilterCss } from './chrome/c4-filter.ts'
 import { motionCss } from './chrome/motion.ts'
 import { detailsPanelCss } from './chrome/shell.ts'
@@ -48,6 +48,7 @@ import { workBadgeCss } from './work/badge.ts'
 import { workDetailsCss } from './work/component-tasks.ts'
 import { workCss } from './work/island.ts'
 import { pinsCss } from './work/pins.ts'
+import { routeLabelsCss } from './route-labels.ts'
 
 const backlogMark = readFileSync(backlogMarkFile).toString('base64')
 
@@ -124,6 +125,7 @@ const style = `
   body.hud-hidden #details,
   body.hud-hidden #work,
   body.hud-hidden #map-view,
+  body.hud-hidden #map-level,
   body.hud-hidden #pins { display: none; }
   button { font: inherit; color: inherit; background: transparent; cursor: pointer; }
   button:focus-visible { outline: 2px solid var(--highlight); outline-offset: -1px; }
@@ -334,7 +336,7 @@ const style = `
   #zoom-in, #zoom-out { justify-content: center; font-size: 12px; line-height: 1.2; }
   .control-glyph { display: block; transform-origin: center; }
   /* A bar placed from the window sets --window-inset to the chrome inset it has to add. */
-  body #work, body #map-view, body #changes {
+  body #work, body #map-view, body #map-level, body #changes {
     left: calc(var(--hierarchy-inset) + var(--window-inset, 0px) + 24px);
     right: calc(var(--details-inset) + var(--window-inset, 0px) + 24px);
     max-width: calc(100% - var(--hierarchy-inset) - var(--details-inset) - 2 * var(--window-inset, 0px) - 48px);
@@ -381,9 +383,9 @@ const style = `
   .mark { flex: none; }
   .ghost { opacity: 0.5; }
   @media (prefers-reduced-motion: reduce) {
-    #hierarchy, #hierarchy-toggle .hierarchy-chevron, #hierarchy-content, #hierarchy-title .pane-label, #details, body.details-hidden #details, body #work, body #map-view, #header > #web-search { transition: none; }
+    #hierarchy, #hierarchy-toggle .hierarchy-chevron, #hierarchy-content, #hierarchy-title .pane-label, #details, body.details-hidden #details, body #work, body #map-view, body #map-level, #header > #web-search { transition: none; }
   }
-${floatingBarCss}${chromeCss}${anchoredPopoverCss}${creditsCss}${motionCss}${revisionCss}${searchCss}${highlightCss}${sourceCss}${fileDiffCss}${taskDiffCss}${comparisonDetailsCss}${hierarchyComparisonCss}${comparisonControlCss}${backlogMarkCss}${workBadgeCss}${workDetailsCss}${flowRowCss}${mapCss}${pinsCss}${workCss}${tipCss}${projectEditorCss}
+${floatingBarCss}${chromeCss}${anchoredPopoverCss}${creditsCss}${motionCss}${revisionCss}${searchCss}${highlightCss}${sourceCss}${fileDiffCss}${taskDiffCss}${comparisonDetailsCss}${hierarchyComparisonCss}${comparisonControlCss}${backlogMarkCss}${workBadgeCss}${workDetailsCss}${flowRowCss}${mapCss}${routeLabelsCss}${pinsCss}${workCss}${tipCss}${projectEditorCss}
 ${emptyStateCss}
 ${addDialogCss}${editorCss}
 ${relationshipCardCss}${removeCss}${editableCss}${mapDebugCss}${detailsPanelCss}${mapViewCss}${c4FilterCss}`
@@ -466,7 +468,7 @@ export function renderPage(payload: WebBootPayload, url?: URL): string {
     + `<div class="header-actions">${projectReviewControl}<div id="map-controls" class="controls" aria-label="Map controls"><button id="fit" aria-label="Fit map">${fitIcon}<span>Fit</span></button><button id="zoom-out" aria-label="Zoom out"><span class="control-glyph">−</span></button><span id="zoom" aria-live="polite"></span><button id="zoom-in" aria-label="Zoom in"><span class="control-glyph">+</span></button></div><div class="header-utilities">${settingsControl(themeControl())}${helpControl()}${creditsControl(infoIcon, lockup)}</div></div>`
     + '</header>'
     + `<nav id="hierarchy" aria-label="Hierarchy"><div id="hierarchy-title"><span class="pane-label">Hierarchy</span>${writable ? '<button id="add" type="button" aria-label="Add">+</button>' : ''}<button id="hierarchy-toggle" type="button" aria-controls="hierarchy-content">${hierarchyIcon}</button></div><div id="hierarchy-content"><div id="flows"></div><div id="tree"></div><div id="legend">${legend()}</div></div></nav>`
-    + `<div id="map" role="tabpanel" aria-label="Architecture map"></div>${mapViewControl()}${c4FilterControl()}`
+    + `<div id="map" role="tabpanel" aria-label="Architecture map"></div>${mapViewControl()}${mapLevelControl()}${c4FilterControl()}`
     + emptyState(payload)
     + `<div id="details-dock"><aside id="details" aria-label="Details"><div class="details-controls"><button id="details-expand" aria-label="Expand details" title="Expand details" aria-expanded="false">${expandIcon}${collapseIcon}</button><button id="details-close" aria-label="Close details">${closeIcon}</button></div><p class="meta"></p><h1></h1><nav class="controls tabs"></nav><div class="body"></div></aside></div>`
     + `<script type="application/json" id="world">${json}</script>`

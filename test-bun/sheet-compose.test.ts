@@ -80,10 +80,9 @@ test.concurrent('the composed system reads west to east while complete subtrees 
   for (const entry of ['entry-a', 'entry-b']) {
     assert.ok(right(entry) < slabs.get('mid-a')!.rect.gx)
   }
-  assert.ok(right('mid-a') < slabs.get('core')!.rect.gx)
+  // Layered: every flow step stands one column further east (entry -> mid-a -> mid-b -> core).
+  assert.ok(right('mid-a') < slabs.get('mid-b')!.rect.gx)
   assert.ok(right('mid-b') < slabs.get('core')!.rect.gx)
-  assert.ok(slabs.get('mid-b')!.rect.gy > slabs.get('mid-a')!.rect.gy)
-  assert.ok(slabs.get('mid-b')!.rect.gy > slabs.get('core')!.rect.gy)
 
   for (const building of placement.buildings.filter(item => item.kind === 'component')) {
     const slab = placement.slabs.find(item => item.representationId === building.surface)

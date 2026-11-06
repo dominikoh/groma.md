@@ -8,10 +8,11 @@ import { ROUTE_UNIT } from './space.ts'
 /** A bend costs three cells of length. More gives routes with fewer bends that take longer ways round. */
 export const BEND = ROUTE_UNIT * 3
 /**
- * Crossing another route costs five bends: more than going round a small building, a few cells and a bend longer, by a
- * side wall of each end. More gives fewer crossings and longer detours.
+ * Crossing another route costs ten bends: a crossing is the hardest thing to read on a dense map, so a route goes round
+ * a building or two before it cuts through others. Measured on dense maps, doubling it from five bends removed a
+ * tenth to a quarter of the crossings for 6-20% more route length. More gives fewer crossings and longer detours.
  */
-export const CROSSING = BEND * 5
+export const CROSSING = BEND * 10
 /** Leaving or entering by a wall other than the preferred one; another wall wins only where it saves crossings or length. */
 export const OTHER_WALL = BEND / 4
 /**
@@ -21,3 +22,8 @@ export const OTHER_WALL = BEND / 4
 export const CROWDING = 2
 /** A path that fits nowhere else may overfill a channel, at a cost above any detour. A sentinel rather than a dial. */
 export const OVERFLOW = BEND * 40
+/**
+ * A route along a channel stretch that a route sharing its source or target already takes pays this share of the length:
+ * routes into one element, or out of one, ride a common trunk as early as they can instead of running side by side.
+ */
+export const JOINED_LENGTH = 0.8

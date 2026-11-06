@@ -4,12 +4,14 @@ import { createProjectSettings } from './settings/control.ts'
 import { createProjectReview } from './review/control.ts'
 import type { ProjectProfile } from '../../project-profile.ts'
 import type { AnnotatedElement, AnnotatedRelationship, WorkItem } from '../../types.ts'
-import { elementWorkGroups, touchedElements } from '../../work/pins.ts'
+import { subtreeWorkGroups, touchedElements } from '../../work/pins.ts'
 import type { FlowRef } from '../flows.ts'
 import { createAddControl } from './chrome/add.ts'
 import { createEmptyState } from './chrome/empty.ts'
 import { createMapDebugPanel } from './chrome/map-debug.ts'
-import { bindMapView, readSavedMapControls, saveMapControls } from './chrome/map-view.ts'
+import { bindMapLevel, bindMapView, readSavedMapControls, saveMapControls } from './chrome/map-view.ts'
+import { levelWorld, type MapLevel } from '../../level-world.ts'
+import { sheetScene } from '../../sheet/scene.ts'
 import { bindC4Filter } from './chrome/c4-filter.ts'
 import { animateControl, animateContent } from './chrome/motion.ts'
 import { measureFrame, type MapFrame } from './chrome/frame.ts'
@@ -31,6 +33,7 @@ import { paintRelationship } from './organisms/relationship-details.ts'
 import { detailsTabAfterSelection, detailsTabAfterWork, type DetailsTab, inspectSelection, paintDetails } from './organisms/details.ts'
 import { createHierarchy } from './organisms/hierarchy.ts'
 import { createPins } from './work/pins.ts'
+import { createRouteLabels } from './route-labels.ts'
 import { createTip } from './organisms/tip.ts'
 import { createProjectEditor } from './project/editor.ts'
 import { createAuthoring } from './authoring.ts'
@@ -54,6 +57,33 @@ let currentPins = boot.pins
 let mapMeta = { generation: boot.generation, timings: boot.timings }
 const opened = readView(location, world, work.items, boot.revisions, readSavedTheme(localStorage), boot.comparison, readSavedMapControls(localStorage))
 saveMapControls(opened, localStorage)
+/** The payload as the server sent it; the map draws it at the chosen C4 level. */
+let fullPayload: WebPayload = boot
+let level: MapLevel = opened.mapLevel
+let levelOwner: ReadonlyMap<string, string> | undefined
+/** Context and Container redraw the full world without the levels below them; a comparison stays at Component. */
+function leveled(payload: WebPayload): WebPayload {
+  levelOwner = undefined
+  if (level === 'component' || payload.comparison) return payload
+  const projected = levelWorld(payload.world, level)
+  levelOwner = projected.owner
+  return { ...payload, world: projected.world, sheet: sheetScene(projected.world), pins: levelPins(payload.pins) }
+}
+/** A pin stands on the element that represents its own at this level. */
+function levelPins<Pin extends { elementId: string }>(all: readonly Pin[]): Pin[] {
+  const owner = levelOwner
+  if (owner === undefined) return [...all]
+  return all.flatMap(pin => {
+    const elementId = owner.get(pin.elementId)
+    return elementId === undefined ? [] : [{ ...pin, elementId }]
+  })
+}
+{
+  const view = leveled(boot)
+  world = view.world
+  sheet = view.sheet
+  currentPins = view.pins
+}
 const changes = createComparisonControl(document.body, select, () => {
   repaintScene(false)
   paintViewState()
@@ -81,8 +111,15 @@ const emptyState = createEmptyState(hosts.emptyHost)
 if (data.add !== undefined) createAddControl(document.getElementById('add')!, data.add)
 const shell = createWebShell(document.body, hierarchyContent, hierarchyToggle, detailsHost, map.svg)
 const tip = createTip(host)
-const pins = createPins(host, id => map.anchorOf(id), id => toggleTask(id, false), tip)
-const island = createWorkIsland(host, id => toggleTask(id), pins.show, tip)
+const routeLabels = createRouteLabels(host)
+/** Tasks on an element or anything inside it, read against the full world so every level lists the same work. */
+function selectedWorkGroups(id: string) { return subtreeWorkGroups(work, id, fullPayload.world) }
+const pins = createPins(host, id => map.anchorOf(id), tip, id => {
+  select(id, false, 'map')
+  detailsTab = 'tasks'
+  paintViewState()
+})
+const island = createWorkIsland(host, pins.show, tip)
 const hierarchy = createHierarchy(treeHost, select)
 const themeControl = bindThemeControl(document.getElementById('theme') as HTMLDetailsElement, opened.theme, syncUrl)
 let hudVisible = opened.hudVisible
@@ -93,6 +130,7 @@ const initial = primarySystem(world)
 if (boot.revision === null && selection.kind === 'none' && initial !== undefined) {
   selection = selectArchitecture(noSelection, initial.representationId, false)
 }
+selection = retainSelection(selection, id => world.elements.some(element => element.representationId === id))
 /** Tasks activated from pins or chips, in activation order; selection is independent and this order supplies its deactivation fallback. */
 let activeTaskIds: string[] = selection.kind === 'task' ? [selection.id] : []
 let detailsTab: DetailsTab = opened.tab
@@ -119,13 +157,14 @@ const taskDiff = createTaskDiffControl({
   repaint: paintViewState, select,
 })
 const viewport = (): MapFrame => measureFrame(hosts, hudVisible)
-emptyState.paint(world, project, !revisionControl.live) // Before the first fit; a published view hides the page's notice.
+emptyState.paint(fullPayload.world, project, !revisionControl.live) // Before the first fit; a published view hides the page's notice.
 const camera = createCameraSession({
   frame: viewport, bounds: () => scene.bounds,
   focus: (frame, fitted) => fitHighlights(scene, changes.targets(), frame, zoomLimits(fitted).max),
   approach: map.approach, readout: zoomHost, host,
   move(view, zoom) {
     const scaleChanged = map.move(view, zoom)
+    routeLabels.place(view)
     pins.place(view)
     return scaleChanged
   },
@@ -164,7 +203,7 @@ function syncUrl(): void {
   history.replaceState(null, '', `${location.pathname}${query}`)
 }
 
-function currentMapControls() { return { mapView: mapMotion.view, hiddenFilters: filterC4.hidden } }
+function currentMapControls() { return { mapView: mapMotion.view, hiddenFilters: filterC4.hidden, mapLevel: level } }
 function rememberMapControls(): void {
   saveMapControls(currentMapControls(), localStorage)
   syncUrl()
@@ -175,7 +214,6 @@ function paintMapState(): void {
   map.changes(changes.marks())
   highlights.paint(selection, world, activeFlows, activeTaskIds.map(id => workItem(id)).filter((item): item is WorkItem => item !== undefined))
   pins.activate(activeTaskIds, task?.id)
-  island.activate(activeTaskIds, task?.id)
 }
 
 function paintViewState(commitUrl = true): void {
@@ -187,7 +225,7 @@ function paintViewState(commitUrl = true): void {
   paintFlows(flowsHost, world, activeFlows, toggleFlow, {
     title: 'Actors', selectedIds: selectedArchitecture(selection), onSelectActor: select,
   })
-  paintHeaderSummary(statsHost, world, project)
+  paintHeaderSummary(statsHost, fullPayload.world, project)
   paintDetailsState(task)
   shell.paint(selection)
 }
@@ -229,7 +267,7 @@ function paintDetailsState(task: WorkItem | undefined): void {
       },
       code: detailsTab === 'how' && revisionControl.comparison === undefined ? source.code() : [],
       onSource: source.open,
-      workGroups: selected?.kind === 'component' ? elementWorkGroups(work, selected.representationId, world) : [],
+      workGroups: selected === undefined ? [] : selectedWorkGroups(selected.representationId),
       onTask: toggleTask,
       ...(selected === undefined ? {} : authoring.paneWrites(selected.id, selectedArchitecture(selection))),
     })
@@ -373,6 +411,7 @@ function openView(search: string): void {
   detailsTab = next.tab
   filterC4.setHidden(next.hiddenFilters)
   mapAnimator.choose(next.mapView)
+  chooseLevel(next.mapLevel, false)
   repaintScene(false)
   saveMapControls(currentMapControls(), localStorage)
   paintViewState()
@@ -390,6 +429,7 @@ function repaintScene(fit: boolean): void {
   const after = sceneCentre(scene.bounds)
   paintMapView(mapMotion.view)
   const rehighlight = debug.paint(() => map.paint(scene))
+  routeLabels.paint(scene)
   pins.paint(currentPins.filter(pin => map.anchorOf(pin.elementId) !== undefined))
   const fitted = camera.refitTo(frame)
   if (fit && (mapMotion.morphing || following)) {
@@ -410,6 +450,17 @@ const paintMapView = bindMapView(document.getElementById('map-view')!, view => {
   rememberMapControls()
 })
 paintMapView(mapMotion.view)
+const paintMapLevel = bindMapLevel(document.getElementById('map-level')!, next => chooseLevel(next))
+paintMapLevel(level)
+/** Redraws the full payload at another C4 level; the morph and the fit follow as for any new sheet. */
+function chooseLevel(next: MapLevel, remember = true): void {
+  paintMapLevel(next)
+  if (next === level) return
+  level = next
+  camera.touched = false
+  applyLeveledWorld(leveled(fullPayload), false)
+  if (remember) rememberMapControls()
+}
 
 bindChromeActions({
   hud: toggleHud,
@@ -422,6 +473,10 @@ bindChromeActions({
 })
 
 function applyWorld(payload: WebPayload, reset = false): void {
+  fullPayload = payload
+  applyLeveledWorld(leveled(payload), reset)
+}
+function applyLeveledWorld(payload: WebPayload, reset: boolean): void {
   mapMeta = { generation: payload.generation, timings: payload.timings }
   world = payload.world
   changes.update(world, payload.comparison, payload.revision?.id, primarySelection(selection))
@@ -429,7 +484,7 @@ function applyWorld(payload: WebPayload, reset = false): void {
   sheet = payload.sheet
   project = payload.project ?? undefined
   currentPins = payload.pins
-  emptyState.paint(world, project, !revisionControl.live) // Before measuring, so the fit leaves the card's new space.
+  emptyState.paint(fullPayload.world, project, !revisionControl.live) // Before measuring, so the fit leaves the card's new space.
   mapAnimator.retarget(sheet)
   scene = projectedScene()
   const fitted = camera.refitTo(viewport())
@@ -461,10 +516,9 @@ function applyWorld(payload: WebPayload, reset = false): void {
 /** Repaints only the optional Backlog layer; map projection, painting and camera state stay unchanged. */
 function applyWork(payload: WebWorkPayload): void {
   work = payload.work
-  currentPins = payload.pins
+  currentPins = levelPins(payload.pins)
   const selected = worldElement(primarySelection(selection))
-  const hasTasks = selected?.kind === 'component'
-    && elementWorkGroups(work, selected.representationId, world).length > 0
+  const hasTasks = selected !== undefined && selectedWorkGroups(selected.representationId).length > 0
   detailsTab = detailsTabAfterWork(detailsTab, hasTasks)
   activeTaskIds = activeTaskIds.filter(id => workItem(id) !== undefined)
   selection = retainSelection(selection, id => known(id))
@@ -476,6 +530,7 @@ function applyWork(payload: WebWorkPayload): void {
 function paintWorld(): void {
   review.refresh()
   debug.paint(() => map.paint(scene))
+  routeLabels.paint(scene)
   revisionControl.paintProjectEdit(map.svg)
   authoring.refresh()
   pins.paint(currentPins.filter(pin => map.anchorOf(pin.elementId) !== undefined))

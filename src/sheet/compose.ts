@@ -4,6 +4,7 @@ import { MARGIN, translate, unionRects } from './grid.ts'
 import { ISLAND_FONT, ISLAND_SPACING, labelBand, nameCells } from './measure.ts'
 import type { CellRect } from './types.ts'
 import { connectionCounts, portSideCells, routeReach } from './route/space.ts'
+import { flowRanks } from './rank.ts'
 
 const SURFACE_INSET = 2
 const UNIT_GAP = 3
@@ -74,7 +75,11 @@ function owners(placement: Placement): Map<string, string> {
     if (island.element) result.set(island.element.representationId, island.key)
   }
   for (const slab of placement.slabs) result.set(slab.representationId, slab.representationId)
-  for (const building of placement.buildings) result.set(building.representationId, building.surface)
+  // A grouped building stands on its zone; the zone's parent surface owns it.
+  const zoneParent = new Map(placement.zones.map(zone => [zone.key, zone.parent]))
+  for (const building of placement.buildings) {
+    result.set(building.representationId, zoneParent.get(building.surface) ?? building.surface)
+  }
   return result
 }
 
@@ -229,13 +234,89 @@ function applyPositions(
   }
 }
 
+/**
+ * Entries in order of the actor traffic they take; an entry another entry already reaches through the
+ * system's own containers stands where that flow puts it instead.
+ */
+function layeredEntries(flow: ContainerFlow, edges: ReadonlyMap<string, readonly string[]>): string[] {
+  const actorWeight = (id: string): number => flow.connections
+    .filter(connection => connection.source === ACTORS && connection.target === id)
+    .reduce((total, connection) => total + connection.weight, 0)
+  const ordered = [...flow.entries].sort((a, b) => actorWeight(b) - actorWeight(a))
+  const kept: string[] = []
+  const reached = new Set<string>()
+  for (const entry of ordered) {
+    if (reached.has(entry)) continue
+    kept.push(entry)
+    const pending = [entry]
+    while (pending.length > 0) {
+      for (const next of edges.get(pending.pop()!) ?? []) {
+        if (!reached.has(next) && next !== entry) {
+          reached.add(next)
+          pending.push(next)
+        }
+      }
+    }
+  }
+  return kept
+}
+
+/**
+ * Columns west to east by the longest flow chain from the entries (flowRanks), ordered within a column by the
+ * mean row of their neighbours in a few alternating sweeps, the usual crossing reduction of a layered layout.
+ * Containers no relationship touches stand in a last column.
+ */
+function layeredColumns(units: readonly string[], flow: ContainerFlow, initialY: ReadonlyMap<string, number>): string[][] {
+  const unitIds = new Set(units)
+  const edges = new Map<string, string[]>()
+  const neighbours = new Map<string, Map<string, number>>(units.map(id => [id, new Map()]))
+  for (const connection of flow.connections) {
+    if (!unitIds.has(connection.source) || !unitIds.has(connection.target)) continue
+    edges.set(connection.source, [...(edges.get(connection.source) ?? []), connection.target])
+    for (const [a, b] of [[connection.source, connection.target], [connection.target, connection.source]] as const) {
+      const map = neighbours.get(a)!
+      map.set(b, (map.get(b) ?? 0) + connection.weight)
+    }
+  }
+  const order = [...units].sort((a, b) => initialY.get(a)! - initialY.get(b)! || a.localeCompare(b))
+  const ranks = flowRanks(order, new Set(layeredEntries(flow, edges)), edges)
+  const last = Math.max(-1, ...ranks.values()) + 1
+  const columns: string[][] = []
+  for (const id of order) {
+    const rank = ranks.get(id) ?? last
+    ;(columns[rank] ??= []).push(id)
+  }
+  const dense = columns.filter(column => column !== undefined)
+  const row = new Map<string, number>()
+  const index = (): void => { for (const column of dense) column.forEach((id, at) => row.set(id, at / Math.max(1, column.length - 1))) }
+  index()
+  for (let sweep = 0; sweep < 4; sweep++) {
+    const sequence = sweep % 2 === 0 ? dense : [...dense].reverse()
+    for (const column of sequence) {
+      const mean = new Map(column.map(id => {
+        let total = 0
+        let weight = 0
+        for (const [other, w] of neighbours.get(id)!) {
+          if (column.includes(other)) continue
+          total += row.get(other)! * w
+          weight += w
+        }
+        return [id, weight > 0 ? total / weight : row.get(id)!] as const
+      }))
+      column.sort((a, b) => mean.get(a)! - mean.get(b)! || row.get(a)! - row.get(b)!)
+      index()
+    }
+  }
+  return dense
+}
+
 function composeSystem(
   placement: Placement,
   systemIsland: string,
   relationships: readonly Pick<AnnotatedRelationship, 'source' | 'target'>[],
 ): number {
   const flow = containerFlow(placement, systemIsland, relationships)
-  if (!flow || flow.mediators.length === 0) return 0
+  if (!flow) return 0
   const island = placement.islands.find(candidate => candidate.key === systemIsland)!
   const originalWidth = island.rect.w
   const units = new Map(placement.slabs
@@ -248,53 +329,26 @@ function composeSystem(
   const reach = routeReach(demand)
   const inset = Math.max(SURFACE_INSET, reach, routeReach(ownPorts))
   const unitGap = Math.max(UNIT_GAP, 2 * reach)
-  const minimumColumnGap = Math.max(MIN_COLUMN_GAP, 2 * reach)
-  const positions = new Map([...units].map(([id, unit]) => [id, { ...unit.rect }]))
-  const entries = flow.entries.map(id => units.get(id)!)
-  const mediators = flow.mediators.map(id => units.get(id)!)
-  const core = units.get(flow.core)!
-  const innerTop = island.rect.gy + inset
-  const innerBottom = island.rect.gy + island.rect.d - inset - labelBand(ISLAND_FONT)
-  const entryRight = Math.max(...entries.map(unit => unit.rect.gx + unit.rect.w))
-  const mediatorWidth = Math.max(...mediators.map(unit => unit.rect.w))
-  const occupiedWidth = entryRight + mediatorWidth + core.rect.w
-  const availableRight = island.rect.gx + island.rect.w - inset
-  const extraWidth = Math.max(0, occupiedWidth + 2 * minimumColumnGap - availableRight)
-  const freeWidth = availableRight + extraWidth - occupiedWidth
-  const columnGap = freeWidth / 2
-  const mediatorX = entryRight + columnGap
-  const coreX = mediatorX + mediatorWidth + columnGap
+  const columnGap = Math.max(MIN_COLUMN_GAP, 2 * reach)
+  const columns = layeredColumns([...units.keys()], flow, new Map([...units].map(([id, unit]) => [id, unit.rect.gy])))
 
-  const entryIds = new Set(flow.entries)
-  const preferred = mediators.reduce((result, mediator) => {
-    const connected = connectedCentreY(mediator.representationId, entryIds, flow.connections, positions)
-    return { total: result.total + connected.total, weight: result.weight + connected.weight }
-  }, { total: 0, weight: 0 })
-  const mediatorHeight = mediators.reduce((total, unit) => total + unit.rect.d, 0)
-    + unitGap * (mediators.length - 1)
-  const currentCentre = mediators.reduce((total, unit) => total + centre(unit.rect).y, 0) / mediators.length
-  const preferredCentre = preferred.weight > 0 ? preferred.total / preferred.weight : currentCentre
-  let mediatorY = clamp(preferredCentre - mediatorHeight / 2, innerTop, innerBottom - mediatorHeight)
-  for (const mediator of mediators) {
-    positions.set(mediator.representationId, {
-      ...mediator.rect,
-      gx: mediatorX + (mediatorWidth - mediator.rect.w) / 2,
-      gy: mediatorY,
-    })
-    mediatorY += mediator.rect.d + unitGap
+  // Each column centres its containers on one axis; a container sits level with the containers already placed
+  // that it talks to, never overlapping the one above it in its column.
+  const positions = new Map<string, CellRect>()
+  let x = island.rect.gx + inset
+  for (const column of columns) {
+    const width = Math.max(...column.map(id => units.get(id)!.rect.w))
+    let floor = Number.NEGATIVE_INFINITY
+    for (const id of column) {
+      const rect = units.get(id)!.rect
+      const placed = connectedCentreY(id, new Set(positions.keys()), flow.connections, positions)
+      const wanted = placed.weight > 0 ? placed.total / placed.weight - rect.d / 2 : floor === Number.NEGATIVE_INFINITY ? 0 : floor
+      const gy = floor === Number.NEGATIVE_INFINITY ? wanted : Math.max(wanted, floor)
+      positions.set(id, { ...rect, gx: x + (width - rect.w) / 2, gy })
+      floor = gy + rect.d + unitGap
+    }
+    x += width + columnGap
   }
-
-  const upstream = new Set([...entryIds, ...flow.mediators])
-  const coreCentre = connectedCentreY(core.representationId, upstream, flow.connections, positions)
-  positions.set(core.representationId, {
-    ...core.rect,
-    gx: coreX,
-    gy: clamp(
-      coreCentre.weight > 0 ? coreCentre.total / coreCentre.weight - core.rect.d / 2 : core.rect.gy,
-      innerTop,
-      innerBottom - core.rect.d,
-    ),
-  })
 
   const occupied = unionRects([...positions.values()])!
   const dx = island.rect.gx + inset - occupied.gx

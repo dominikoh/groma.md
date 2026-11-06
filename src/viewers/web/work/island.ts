@@ -2,7 +2,6 @@ import type { WorkPin } from '../../../work/pins.ts'
 import type { WorkSnapshot } from '../../../types.ts'
 import type { Tip } from '../organisms/tip.ts'
 import { BACKLOG_MARK } from './backlog-mark.ts'
-import { fillWorkBadge, finishingWorkKeys, WORK_BADGE, WORK_BADGE_FINISH_MS } from './badge.ts'
 import { preservedWorkStatuses, toggleWorkStatus, workStatusFilters } from '../../../work/status-filter.ts'
 import type { WorkStatusFilterState } from '../../../work/status-filter.ts'
 import { createWorkSummary, workSummaryCss } from './summary.ts'
@@ -32,24 +31,9 @@ export const workCss = `
   #work button { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; padding: 4px; border-radius: 14px; }
   #work .label { display: flex; align-items: center; gap: 8px; margin-right: 4px; padding-left: 8px; font-weight: 600; }
   #work .label .backlog-mark { width: 29px; height: 36px; }
-  #work .toggle, #work .chip { height: 38px; border-radius: 20px; }
+  #work .toggle { height: 38px; border-radius: 20px; }
   #work .toggle { padding: 4px 10px; border: 1px solid var(--hairline); color: var(--muted); }
   #work .toggle[aria-pressed="true"] { color: var(--highlight-text); border-color: var(--highlight); }
-  #work .strip { display: flex; align-items: flex-start; gap: 8px; overflow-x: auto; overflow-y: hidden; box-sizing: border-box; height: 54px; padding: 5px 0 0; min-width: 0; }
-  #work .chip {
-    flex: none; gap: 8px; padding: 4px 10px 4px 4px; border: 1px solid var(--hairline);
-    font-size: 10px; letter-spacing: 0.08em; filter: grayscale(1);
-  }
-  #work .chip:hover { border-color: var(--ink); }
-  #work .chip.active { filter: none; border-color: var(--highlight); color: var(--highlight-text); }
-  #work .chip .badge { width: 28px; height: 28px; }
-  #work .chip .badge .card { inset: 3px; }
-  #work .chip .badge .face { font-size: 8px; }
-  #work .chip .badge .ring { width: 100%; height: 100%; }
-  #work .chip .badge .face svg { width: 12px; height: 12px; }
-  #work .chip .badge .ring circle { stroke-width: 4; }
-  #work .chip.work-done { --pin: var(--muted); }
-  #work .chip.selected { font-weight: 700; }
   #work .fold svg { transition: transform 0.3s ease; }
   #work.open .fold svg { transform: rotate(180deg); }
   @media (prefers-reduced-motion: reduce) {
@@ -60,8 +44,6 @@ export const workCss = `
 export interface WorkIsland {
   /** Rebuilds the island for these pins; it stays visible while Backlog has a configured workflow. */
   paint(pins: readonly WorkPin[], work: WorkSnapshot): void
-  /** Colours the chips of the active tasks, greyscale otherwise, marks those of the selected task (always one of the active ones) and scrolls the first into view. */
-  activate(active: readonly string[], selected: string | undefined): void
 }
 
 function button(className: string, html: string, onClick: () => void): HTMLButtonElement {
@@ -73,27 +55,15 @@ function button(className: string, html: string, onClick: () => void): HTMLButto
   return node
 }
 
-function chip(pin: WorkPin, finishingAt: number | undefined, onToggle: (id: string) => void, tip: Tip): HTMLButtonElement {
-  const node = button('chip', `${WORK_BADGE}<span>${pin.taskId}</span>`, () => onToggle(pin.taskId))
-  node.dataset.task = pin.taskId
-  node.style.setProperty('--pin', pin.colour)
-  node.dataset.tip = `${pin.assignee ?? 'Unassigned'} · ${pin.title}`
-  tip.attach(node)
-  fillWorkBadge(node, pin, finishingAt)
-  return node
-}
-
 /**
  * The Backlog task island at the map's bottom centre: a pill that unfolds into
- * the label, the configured statuses that have pins and the chip strip. It starts
- * folded with the workflow statuses other than the default and terminal ones
- * shown, and keeps its fold and filters across repaints;
- * clicking a chip toggles its task. The persistent fold control turns while
+ * the label and the configured statuses that have pins, which filter the map's
+ * pins. It starts folded with every status but the final one shown, and keeps
+ * its fold and filters across repaints. The persistent fold control turns while
  * final-size content is clipped out and back in, so text is never scaled.
  */
 export function createWorkIsland(
   host: HTMLElement,
-  onToggle: (taskId: string) => void,
   onShow: (statuses: readonly string[]) => void,
   tip: Tip,
 ): WorkIsland {
@@ -107,11 +77,7 @@ export function createWorkIsland(
   let work: WorkSnapshot = { statuses: [], defaultStatus: '', items: [] }
   const summary = createWorkSummary(tip)
   let statusFilters: WorkStatusFilterState | undefined
-  /** Completion start times keep the flip, hold and fade continuous across rebuilds. */
-  const finishing = new Map<string, number>()
   let open = false
-  let active: readonly string[] = []
-  let selected: string | undefined
   let foldRevision = 0
   let foldAnimation: Animation | undefined
 
@@ -133,49 +99,17 @@ export function createWorkIsland(
     const label = document.createElement('span')
     label.className = 'label'
     label.innerHTML = `${BACKLOG_MARK}<span>Backlog.md<br>Tasks</span>`
-    const strip = document.createElement('div')
-    strip.className = 'strip'
-    const order = new Map(work.statuses.map((status, index) => [status, index]))
-    const shown = pins.filter(pin => statusFilters!.enabled.includes(pin.status) || finishing.has(pin.key))
-    shown.sort((left, right) => order.get(left.status)! - order.get(right.status)!)
-    strip.append(...shown.map(pin => {
-      const node = chip(pin, finishing.get(pin.key), onToggle, tip)
-      node.classList.toggle('work-disappearing', finishing.has(pin.key) && !statusFilters!.enabled.includes(pin.status))
-      return node
-    }))
-    return [
-      label,
-      ...statusFilters!.available.map(toggle),
-      divider,
-      strip,
-    ]
-  }
-  /** Colours the active tasks' chips, marks the selected task's and scrolls the strip to centre the first of those when it lies outside the visible part. */
-  const mark = (): void => {
-    for (const chip of island.querySelectorAll<HTMLElement>('.chip')) {
-      chip.classList.toggle('active', active.includes(chip.dataset.task!))
-      chip.classList.toggle('selected', chip.dataset.task === selected)
-    }
-    const chip = island.querySelector<HTMLElement>('.chip.selected')
-    if (chip === null) return
-    const strip = chip.parentElement!
-    const box = strip.getBoundingClientRect()
-    const { left, right } = chip.getBoundingClientRect()
-    if (left >= box.left && right <= box.right) return
-    strip.scrollBy({ left: (left + right - box.left - box.right) / 2, behavior: 'smooth' })
+    // Statuses filter the map's pins; each element's task list opens from its pin.
+    return [label, ...statusFilters!.available.map(toggle)]
   }
   /** Rebuilds only changing content; the disclosure control remains the same DOM node. */
   const rebuild = (): void => {
-    const scrolled = island.querySelector('.strip')?.scrollLeft ?? 0
     foldAnimation?.cancel()
     foldAnimation = undefined
     foldRevision += 1
     content.replaceChildren(...parts())
     island.hidden = work.statuses.length === 0
     island.classList.toggle('open', open)
-    // the strip stays where it was, so a repaint moves it only to reveal a selected chip
-    island.querySelector('.strip')?.scrollTo(scrolled, 0)
-    mark()
     summary.update(pins, work, statusFilters?.enabled ?? [], !open)
   }
   const fold = button('fold', CHEVRON, () => {
@@ -199,7 +133,6 @@ export function createWorkIsland(
     cover.finished.then(() => {
       if (revision !== foldRevision) return
       content.replaceChildren(...parts())
-      mark()
       cover.cancel()
       foldAnimation = island.animate(
         [
@@ -215,17 +148,6 @@ export function createWorkIsland(
   host.append(island)
   return {
     paint(nextPins, nextWork) {
-      const visible = new Set(open
-        ? pins
-          .filter(pin => statusFilters?.enabled.includes(pin.status) || finishing.has(pin.key))
-          .map(pin => pin.key)
-        : [])
-      const started = finishingWorkKeys(pins, nextPins)
-      for (const key of started) {
-        if (visible.has(key)) {
-          finishing.set(key, Date.now())
-        } else started.delete(key)
-      }
       const enabled = preservedWorkStatuses(work.statuses, statusFilters?.enabled)
       pins = nextPins
       work = nextWork
@@ -237,15 +159,6 @@ export function createWorkIsland(
       )
       onShow(statusFilters.enabled)
       rebuild()
-      if (started.size > 0) setTimeout(() => {
-        for (const key of started) finishing.delete(key)
-        rebuild()
-      }, WORK_BADGE_FINISH_MS)
-    },
-    activate(nextActive, nextSelected) {
-      active = nextActive
-      selected = nextSelected
-      mark()
     },
   }
 }

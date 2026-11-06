@@ -1,10 +1,19 @@
 import type { MapView } from '../iso/view-motion/presentation.ts'
 import { readHiddenFilters, type MapFilter } from './c4-filter.ts'
+import { isMapLevel, type MapLevel } from '../../../level-world.ts'
 
 export interface MapControls {
   mapView: MapView
   hiddenFilters: ReadonlySet<MapFilter>
+  /** The C4 diagram level the map draws: System Context, Container or Component. */
+  mapLevel: MapLevel
 }
+
+const levels: { value: MapLevel; label: string; title: string }[] = [
+  { value: 'context', label: 'Context', title: 'C4 System Context: people and software systems' },
+  { value: 'container', label: 'Container', title: 'C4 Container: applications and data stores' },
+  { value: 'component', label: 'Component', title: 'C4 Component: the parts inside each container' },
+]
 
 const MAP_CONTROLS_STORAGE_KEY = 'groma.mapControls'
 
@@ -20,12 +29,13 @@ export function readMapControls(params: URLSearchParams, defaults?: MapControls)
   return {
     mapView: views.find(view => view.value === requested)?.value ?? defaults?.mapView ?? 'iso',
     hiddenFilters: params.has('hide') ? readHiddenFilters(params.get('hide')!) : new Set(defaults?.hiddenFilters),
+    mapLevel: isMapLevel(params.get('level')) ? params.get('level') as MapLevel : defaults?.mapLevel ?? 'component',
   }
 }
 
 /** Defaults are explicit so a shared all-visible Iso view overrides the recipient's preferences. */
 export function mapControlEntries(controls: MapControls): [string, string][] {
-  return [['view', controls.mapView], ['hide', [...controls.hiddenFilters].join(',')]]
+  return [['view', controls.mapView], ['hide', [...controls.hiddenFilters].join(',')], ['level', controls.mapLevel]]
 }
 
 /** Browser preferences use the URL representation, keeping one parser for both entry points. */
@@ -39,15 +49,15 @@ export function saveMapControls(controls: MapControls, storage: Pick<Storage, 's
 
 export function mapViewControl(): string {
   return `<div id="map-view" class="floating-map-bar" role="tablist" aria-label="Map view"><span class="view-indicator" aria-hidden="true"></span>${views.map(view =>
-    `<button type="button" role="tab" data-view="${view.value}" title="${view.title}" aria-label="${view.title}" aria-controls="map" aria-selected="${view.value === 'iso'}" tabindex="${view.value === 'iso' ? 0 : -1}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${view.icon}</svg><span>${view.label}</span></button>`,
+    `<button type="button" role="tab" data-value="${view.value}" title="${view.title}" aria-label="${view.title}" aria-controls="map" aria-selected="${view.value === 'iso'}" tabindex="${view.value === 'iso' ? 0 : -1}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${view.icon}</svg><span>${view.label}</span></button>`,
   ).join('')}</div>`
 }
 
-/** Clicks and arrow keys use the same presentation action as F2. */
-export function bindMapView(host: HTMLElement, choose: (view: MapView) => void): (view: MapView) => void {
+/** A floating tab bar with a sliding indicator; clicks and arrow keys choose the tab's `data-value`. */
+function bindTabBar<Value extends string>(host: HTMLElement, choose: (value: Value) => void): (value: Value) => void {
   const tabs = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
   const indicator = host.querySelector<HTMLElement>('.view-indicator')!
-  let selectedView: MapView | undefined
+  let selectedValue: Value | undefined
   function placeIndicator() {
     const tab = tabs.find(tab => tab.getAttribute('aria-selected') === 'true')!
     if (!tab.offsetWidth) return
@@ -56,7 +66,7 @@ export function bindMapView(host: HTMLElement, choose: (view: MapView) => void):
   }
   new ResizeObserver(placeIndicator).observe(host)
   for (const [index, tab] of tabs.entries()) {
-    tab.addEventListener('click', () => choose(tab.dataset.view as MapView))
+    tab.addEventListener('click', () => choose(tab.dataset.value as Value))
     tab.addEventListener('keydown', event => {
       const next = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key]
       if (next === undefined) return
@@ -66,11 +76,11 @@ export function bindMapView(host: HTMLElement, choose: (view: MapView) => void):
       tabs[next]!.click()
     })
   }
-  return view => {
-    if (view === selectedView) return
-    selectedView = view
+  return value => {
+    if (value === selectedValue) return
+    selectedValue = value
     for (const tab of tabs) {
-      const selected = tab.dataset.view === view
+      const selected = tab.dataset.value === value
       tab.setAttribute('aria-selected', String(selected))
       tab.tabIndex = selected ? 0 : -1
     }
@@ -78,19 +88,35 @@ export function bindMapView(host: HTMLElement, choose: (view: MapView) => void):
   }
 }
 
+/** Clicks and arrow keys use the same presentation action as F2. */
+export function bindMapView(host: HTMLElement, choose: (view: MapView) => void): (view: MapView) => void {
+  return bindTabBar(host, choose)
+}
+
+export function mapLevelControl(): string {
+  return `<div id="map-level" class="floating-map-bar" role="tablist" aria-label="C4 level"><span class="view-indicator" aria-hidden="true"></span>${levels.map(level =>
+    `<button type="button" role="tab" data-value="${level.value}" title="${level.title}" aria-label="${level.title}" aria-controls="map" aria-selected="${level.value === 'component'}" tabindex="${level.value === 'component' ? 0 : -1}"><span>${level.label}</span></button>`,
+  ).join('')}</div>`
+}
+
+export function bindMapLevel(host: HTMLElement, choose: (level: MapLevel) => void): (level: MapLevel) => void {
+  return bindTabBar(host, choose)
+}
+
 export const mapViewCss = `
-  #map-view {
+  #map-view, #map-level {
     position: absolute; top: 74px; z-index: 7; width: fit-content; margin: 0 auto; padding: 5px; gap: 2px;
   }
-  #map-view .view-indicator {
+  #map-level { top: 124px; }
+  #map-view .view-indicator, #map-level .view-indicator {
     position: absolute; left: 0; top: 5px; height: 34px; border-radius: 20px; background: var(--ink); pointer-events: none;
     box-shadow: 0 1px 4px #0002; transition: transform 340ms cubic-bezier(.22, 1, .36, 1), width 340ms cubic-bezier(.22, 1, .36, 1);
   }
-  #map-view button { position: relative; z-index: 1; transition: color 180ms ease; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border: 0; border-radius: 20px; color: var(--muted); }
+  #map-view button, #map-level button { position: relative; z-index: 1; transition: color 180ms ease; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border: 0; border-radius: 20px; color: var(--muted); }
   #map-view svg { width: 16px; height: 16px; flex: none; }
-  #map-view button:hover { color: var(--ink); }
-  #map-view [aria-selected="true"], #map-view [aria-selected="true"]:hover { color: var(--paper); }
+  #map-view button:hover, #map-level button:hover { color: var(--ink); }
+  #map-view [aria-selected="true"], #map-view [aria-selected="true"]:hover, #map-level [aria-selected="true"], #map-level [aria-selected="true"]:hover { color: var(--paper); }
   @media (prefers-reduced-motion: reduce) {
-    #map-view .view-indicator, #map-view button { transition: none; }
+    #map-view .view-indicator, #map-view button, #map-level .view-indicator, #map-level button { transition: none; }
   }
 `

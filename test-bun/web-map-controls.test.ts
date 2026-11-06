@@ -14,22 +14,23 @@ function storage() {
 
 test.concurrent('saved controls restore the last projection and filters when the URL omits them', () => {
   const saved = storage()
-  expect(readSavedMapControls(saved)).toEqual({ mapView: 'iso', hiddenFilters: new Set() })
+  expect(readSavedMapControls(saved)).toEqual({ mapView: 'iso', hiddenFilters: new Set(), mapLevel: 'component' })
   for (const mapView of ['2d', 'layers', 'iso'] as const) {
-    const controls = { mapView, hiddenFilters: new Set<MapFilter>(['container', 'relationship']) }
+    const controls = { mapView, hiddenFilters: new Set<MapFilter>(['container', 'relationship']), mapLevel: 'container' as const }
     saveMapControls(controls, saved)
     expect(readMapControls(new URLSearchParams(), readSavedMapControls(saved))).toEqual(controls)
   }
 })
 
 test.concurrent('explicit URL controls override saved choices independently, including all-visible filters', () => {
-  const saved = { mapView: 'layers' as const, hiddenFilters: new Set<MapFilter>(['component']) }
+  const saved = { mapView: 'layers' as const, hiddenFilters: new Set<MapFilter>(['component']), mapLevel: 'context' as const }
   expect(readMapControls(new URLSearchParams('view=2d'), saved)).toEqual({ ...saved, mapView: '2d' })
   expect(readMapControls(new URLSearchParams('hide=container,relationship'), saved)).toEqual({
-    mapView: 'layers', hiddenFilters: new Set(['container', 'relationship']),
+    mapView: 'layers', hiddenFilters: new Set(['container', 'relationship']), mapLevel: 'context',
   })
+  expect(readMapControls(new URLSearchParams('level=container'), saved)).toEqual({ ...saved, mapLevel: 'container' })
   expect(readMapControls(new URLSearchParams('view=iso&hide='), saved)).toEqual({
-    mapView: 'iso', hiddenFilters: new Set(),
+    mapView: 'iso', hiddenFilters: new Set(), mapLevel: 'context',
   })
 })
 
@@ -37,11 +38,11 @@ test.concurrent('shared projections and filters override different browser prefe
   const world = await loadAnnotatedArchitecture(viewerFixtureRoot)
   const component = world.elements.find(element => element.kind === 'component')!
   const filters: MapFilter[] = ['actor', 'system', 'container', 'component', 'relationship']
-  const recipient = { mapView: 'layers' as const, hiddenFilters: new Set(filters) }
+  const recipient = { mapView: 'layers' as const, hiddenFilters: new Set(filters), mapLevel: 'context' as const }
   for (const mapView of ['iso', '2d', 'layers'] as const) {
     for (const hidden of [[], ...filters.map(filter => [filter]), ['container', 'relationship'] as MapFilter[], filters]) {
       const hiddenFilters = new Set(hidden)
-      const controls = { mapView, hiddenFilters }
+      const controls = { mapView, hiddenFilters, mapLevel: 'container' as const }
       const url = new URL(`https://example.test/?component=${component.id}&tab=how&theme=dark`)
       const state = { ...readView(url, world, []), ...controls }
       url.search = writeView(state, world, [], url.pathname)
@@ -69,13 +70,13 @@ test.concurrent('restored filter buttons and clicks drive the same visible scene
   } as unknown as HTMLElement
   const saved = storage()
   const filter = bindC4Filter(host, new Set(['relationship']), () => {
-    saveMapControls({ mapView: '2d', hiddenFilters: filter.hidden }, saved)
+    saveMapControls({ mapView: '2d', hiddenFilters: filter.hidden, mapLevel: 'component' }, saved)
   })
   expect(filter.project(scene).routes).toEqual([])
   expect(buttons.get('relationship')?.pressed).toBe('false')
   buttons.get('relationship')!.click!()
   expect(filter.project(scene).routes).toEqual(scene.routes)
-  expect(readSavedMapControls(saved)).toEqual({ mapView: '2d', hiddenFilters: new Set() })
+  expect(readSavedMapControls(saved)).toEqual({ mapView: '2d', hiddenFilters: new Set(), mapLevel: 'component' })
   filter.setHidden(new Set(['container']))
   expect(filter.project(scene).slabs).toEqual([])
   expect(buttons.get('container')?.pressed).toBe('false')

@@ -1,217 +1,161 @@
 import type { Point } from '../../../types.ts'
 import type { WorkPin } from '../../../work/pins.ts'
-import { fillWorkBadge, finishingWorkKeys, WORK_BADGE, WORK_BADGE_FINISH_MS } from './badge.ts'
 import type { Camera } from '../iso/camera/camera.ts'
 import type { Tip } from '../organisms/tip.ts'
+import { BACKLOG_MARK } from './backlog-mark.ts'
 
-/** Screen pixels between the badges of pins that share an element. */
-const FAN_PITCH = 46
-/** Screen pixels from the foot up to the label of a pin standing straight. */
+/** Screen pixels from the foot up to the badge of a pin. */
 const STEM = 22
-const TRAVEL_MS = 850
+/** The ring's radius and stroke in the badge's 40 px box. */
+const RING_RADIUS = 17
+const RING_LENGTH = 2 * Math.PI * RING_RADIUS
 
-interface Pinned {
-  node: HTMLElement
-  elementId: string
-  anchor: Point
-  travel?: { offset: Point; started: number; lift: number }
+/** How a task's status reads on the map, in ring order. */
+export type WorkStage = 'todo' | 'progress' | 'blocked' | 'done'
+const STAGES: readonly { stage: WorkStage; label: string }[] = [
+  { stage: 'progress', label: 'In progress' },
+  { stage: 'blocked', label: 'Blocked' },
+  { stage: 'todo', label: 'To do' },
+  { stage: 'done', label: 'Done' },
+]
+
+/** The default status is planned work, the final one finished; a status named like "blocked" is blocked, the rest in progress. */
+export function stageOf(pin: Pick<WorkPin, 'status' | 'draft' | 'terminal'>): WorkStage {
+  if (pin.terminal) return 'done'
+  if (/block/i.test(pin.status)) return 'blocked'
+  if (pin.draft) return 'todo'
+  return 'progress'
 }
 
-/** Travel is relative to the destination, so scene reprojection still owns the anchor. */
-function positionOf(pin: Pinned, now: number, reducedMotion: boolean): Point {
-  const travel = pin.travel
-  if (travel === undefined) return pin.anchor
-  const progress = Math.min(1, (now - travel.started) / TRAVEL_MS)
-  if (progress === 1 || reducedMotion || pin.node.hidden) {
-    pin.travel = undefined
-    return pin.anchor
+/** Tasks per stage on one element, each task once whatever its assignees. */
+export function stageCounts(pins: readonly WorkPin[]): Record<WorkStage, number> {
+  const counts: Record<WorkStage, number> = { todo: 0, progress: 0, blocked: 0, done: 0 }
+  const seen = new Set<string>()
+  for (const pin of pins) {
+    if (seen.has(pin.taskId)) continue
+    seen.add(pin.taskId)
+    counts[stageOf(pin)] += 1
   }
-  const eased = progress * progress * (3 - 2 * progress)
-  return {
-    x: pin.anchor.x + travel.offset.x * (1 - eased),
-    y: pin.anchor.y + travel.offset.y * (1 - eased) - Math.sin(Math.PI * eased) * travel.lift,
-  }
+  return counts
 }
 
 export const pinsCss = `
   #pins { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; pointer-events: none; }
-  .pin {
-    position: absolute; width: 0; height: 0; pointer-events: auto; --pin: var(--ink); filter: grayscale(1);
-    will-change: translate;
+  .pin { position: absolute; width: 0; height: 0; pointer-events: auto; will-change: translate; }
+  .pin .foot { position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px; border-radius: 50%; background: var(--ink); opacity: 0.7; }
+  .pin .stem { position: absolute; left: -0.5px; bottom: 0; width: 1px; height: ${STEM}px; background: var(--ink); opacity: 0.5; }
+  .pin .head { position: absolute; left: -20px; bottom: ${STEM}px; width: 40px; height: 40px; cursor: pointer; }
+  .pin .ring { position: absolute; inset: 0; transform: rotate(-90deg); }
+  .pin .ring circle { fill: none; stroke-width: 4; }
+  .pin .ring .todo { stroke: #8b93a1; }
+  .pin .ring .progress { stroke: #3b82f6; }
+  .pin .ring .blocked { stroke: #ef4444; }
+  .pin .ring .done { stroke: #22c55e; }
+  .pin .face {
+    position: absolute; inset: 6px; border-radius: 50%; display: grid; place-items: center;
+    background: color-mix(in srgb, var(--paper) 82%, transparent);
   }
-  .pin.active { filter: none; }
-  .pin.arriving { animation: pin-arrive 700ms ease-out; }
-  @keyframes pin-arrive {
-    0% { transform: translateY(0); filter: grayscale(0); }
-    50% { transform: translateY(-16px); filter: grayscale(0); }
-    75% { transform: translateY(0); filter: grayscale(0); }
-    100% { transform: translateY(0); filter: grayscale(1); }
+  .pin .face .backlog-mark { width: 16px; height: 20px; filter: grayscale(1); }
+  .pin .count {
+    position: absolute; right: -6px; top: -4px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+    border-radius: 8px; background: var(--ink); color: var(--paper); font-size: 10px; font-weight: 600; line-height: 16px; text-align: center;
   }
-  .pin .foot { position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px; border-radius: 50%; background: color-mix(in srgb, var(--pin) 85%, transparent); }
-  .pin .stem {
-    position: absolute; left: -0.5px; bottom: 0; width: 1px; height: var(--stem); background: color-mix(in srgb, var(--pin) 85%, transparent);
-    transform-origin: bottom center; transform: rotate(var(--lean)); transition: transform 0.3s, height 0.3s;
-  }
-  .pin .head {
-    position: absolute; left: calc(var(--fan) - 20px); bottom: ${STEM}px; width: 40px; transition: left 0.3s;
-    display: flex; flex-direction: column; align-items: center; cursor: pointer;
-  }
-  .pin.work-done .head:hover .card { transform: rotateY(0); }
-  .pin .task {
-    margin-top: 2px; padding: 1px 6px; border-radius: 3px; background: color-mix(in srgb, var(--pin) 85%, transparent); color: var(--on-colour);
-    font-size: 9px; letter-spacing: 0.08em; white-space: nowrap;
-  }
-  .pin.work-draft .badge .face.front { border-style: dashed; }
-  .pin.work-draft .task { border: 1px dashed color-mix(in srgb, var(--pin) 85%, transparent); background: transparent; color: var(--ink); }
-  .pin.work-draft .stem { background: repeating-linear-gradient(to bottom, color-mix(in srgb, var(--pin) 85%, transparent) 0 4px, transparent 4px 7px); }
-  .pin.active .badge { border-radius: 50%; box-shadow: 0 0 0 3px var(--highlight); }
-  /* a 10 by 6 px triangle whose tip ends 3 px above the 3 px ring */
-  .pin.selected .head::before {
-    content: ''; position: absolute; top: -12px; left: calc(50% - 5px);
-    border: 5px solid transparent; border-top: 6px solid var(--highlight);
-  }
+  .pin.active .face { box-shadow: 0 0 0 3px var(--highlight); }
+  .pin.active .face .backlog-mark { filter: none; }
 `
 
-/** A pin's markup: its foot on the element's surface near its left corner, a stem leaning to its head, the head a ringed badge over the task id. */
-const PIN = `<div class="foot"></div><div class="stem"></div><div class="head">${WORK_BADGE}<div class="task"></div></div>`
-
 export interface PinLayer {
-  /** Reconciles the pins by key, so a pin that just finished plays its flip; call after the map painted the scene. */
+  /** One pin per element with work: its ring shows the share of each stage among the element's tasks. */
   paint(pins: readonly WorkPin[]): void
   /** Moves every pin to the surface point it stands on under the camera. */
   place(camera: Camera): void
-  /** Shows pins whose Backlog status is enabled; the pins still shown fan out anew. */
+  /** Shows the pins of elements with a task in one of these statuses. */
   show(statuses: readonly string[]): void
-  /** Colours the pins of the active tasks, greyscale otherwise, and marks those of the selected task, which is always one of the active ones. */
+  /** Marks the pins of elements that an active task touches. */
   activate(active: readonly string[], selected: string | undefined): void
 }
 
-/** The work pins over the map; clicking a pin's head toggles its task. */
-export function createPins(host: HTMLElement, anchorOf: (id: string) => Point | undefined, onToggle: (taskId: string) => void, tip: Tip): PinLayer {
+/** The ring's arcs: each stage's share of the circle, in stage order, starting at the top. */
+function ringArcs(counts: Record<WorkStage, number>): string {
+  const total = STAGES.reduce((sum, { stage }) => sum + counts[stage], 0)
+  let offset = 0
+  return STAGES.filter(({ stage }) => counts[stage] > 0).map(({ stage }) => {
+    const length = counts[stage] / total * RING_LENGTH
+    const arc = `<circle class="${stage}" cx="20" cy="20" r="${RING_RADIUS}" stroke-dasharray="${length} ${RING_LENGTH - length}" stroke-dashoffset="${-offset}"/>`
+    offset += length
+    return arc
+  }).join('')
+}
+
+/**
+ * The work over the map: one pin per element with Backlog tasks, standing on its surface. The ring around the Backlog
+ * mark splits by stage (in progress, blocked, to do, done); the tip counts each stage; clicking opens the element's
+ * task list.
+ */
+export function createPins(host: HTMLElement, anchorOf: (id: string) => Point | undefined, tip: Tip,
+  onOpen: (elementId: string) => void): PinLayer {
   const layer = document.createElement('div')
   layer.id = 'pins'
   host.append(layer)
-  /** Anchors and travel offsets use world pixels; badges keep their screen size. */
-  const pinned = new Map<string, Pinned>()
-  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
-  let travelFrame: number | undefined
-  let pins: readonly WorkPin[] = []
+  const pinned = new Map<string, { node: HTMLElement; anchor: Point; tasks: Set<string>; statuses: Set<string> }>()
   let enabledStatuses: readonly string[] = []
-  const finishing = new Map<string, number>()
   let camera: Camera | undefined
-  /** The first paint is the page's baseline; only pins first seen after it announce their arrival. */
-  let painted = false
-  const place = (scaleChanged = true): void => {
+
+  const place = (): void => {
     if (camera === undefined) return
     layer.style.transform = `translate(${camera.x}px, ${camera.y}px)`
-    if (!scaleChanged) return
-    const now = performance.now()
-    for (const pin of pinned.values()) {
-      const point = positionOf(pin, now, reducedMotion.matches)
-      pin.node.style.translate = `${point.x * camera.k}px ${point.y * camera.k}px`
-    }
-    if (travelFrame === undefined && [...pinned.values()].some(pin => pin.travel !== undefined)) {
-      travelFrame = requestAnimationFrame(() => {
-        travelFrame = undefined
-        place()
-      })
-    }
+    for (const pin of pinned.values()) pin.node.style.translate = `${pin.anchor.x * camera.k}px ${pin.anchor.y * camera.k}px`
   }
-  /** The pins the toggles allow fan out leftwards from their element's foot point, stems leaning back to it; the rest hide. */
-  const fanOut = (): void => {
-    const shown = pins.filter(pin => pinned.has(pin.key) && (enabledStatuses.includes(pin.status) || finishing.has(pin.key)))
-    const visible = new Set(shown.map(pin => pin.key))
-    for (const [key, { node }] of pinned) node.hidden = !visible.has(key)
-    const placed = new Map<string, number>()
-    for (const pin of shown) {
-      const index = placed.get(pin.elementId) ?? 0
-      placed.set(pin.elementId, index + 1)
-      const fan = -index * FAN_PITCH
-      const { node } = pinned.get(pin.key)!
-      node.classList.toggle('work-disappearing', finishing.has(pin.key) && !enabledStatuses.includes(pin.status))
-      node.style.setProperty('--fan', `${fan}px`)
-      node.style.setProperty('--lean', `${Math.atan2(fan, STEM)}rad`)
-      node.style.setProperty('--stem', `${Math.hypot(fan, STEM)}px`)
-    }
+  const filter = (): void => {
+    for (const pin of pinned.values()) pin.node.hidden = ![...pin.statuses].some(status => enabledStatuses.includes(status))
   }
-  const updatePin = (pin: WorkPin, anchor: Point): void => {
-    const previous = pinned.get(pin.key)
-    let node = previous?.node
-    if (node === undefined) {
-      node = document.createElement('div')
-      node.className = painted ? 'pin arriving' : 'pin'
-      node.innerHTML = PIN
-      node.querySelector('.head')!.addEventListener('click', () => onToggle(pin.taskId))
-      tip.attach(node.querySelector('.head')!)
-      layer.append(node)
-    }
-    let travel = previous?.travel
-    if (previous !== undefined && previous.elementId !== pin.elementId) {
-      travel = undefined
-      if (camera !== undefined && !node.hidden && !reducedMotion.matches) {
-        const now = performance.now()
-        const from = positionOf(previous, now, false)
-        const offset = { x: from.x - anchor.x, y: from.y - anchor.y }
-        travel = { offset, started: now, lift: Math.min(40 / camera.k, Math.hypot(offset.x, offset.y) * 0.15) }
-        node.classList.remove('arriving')
-      }
-    }
-    pinned.set(pin.key, { node, anchor, elementId: pin.elementId, travel })
-    node.classList.toggle('work-draft', pin.draft)
-    node.style.setProperty('--pin', pin.colour)
-    node.querySelector<HTMLElement>('.head')!.dataset.tip = `${pin.assignee ?? 'Unassigned'} · ${pin.title}`
-    if (finishing.has(pin.key)) node.classList.remove('arriving')
-    fillWorkBadge(node, pin, finishing.get(pin.key))
-    node.querySelector('.task')!.textContent = pin.taskId
-  }
+
   return {
-    paint(next) {
-      const visible = new Set(pins
-        .filter(pin => pinned.has(pin.key) && enabledStatuses.includes(pin.status))
-        .map(pin => pin.key))
-      const started = finishingWorkKeys(pins, next)
-      for (const key of started) {
-        if (visible.has(key)) finishing.set(key, Date.now())
-        else started.delete(key)
+    paint(pins) {
+      const byElement = Map.groupBy(pins, pin => pin.elementId)
+      for (const [elementId, pin] of pinned) {
+        if (byElement.has(elementId)) continue
+        pin.node.remove()
+        pinned.delete(elementId)
       }
-      pins = next
-      const keep = new Set(pins.map(pin => pin.key))
-      for (const [key, { node }] of pinned) {
-        if (keep.has(key)) continue
-        node.remove()
-        pinned.delete(key)
-      }
-      for (const pin of pins) {
-        const anchor = anchorOf(pin.elementId)
+      for (const [elementId, group] of byElement) {
+        const anchor = anchorOf(elementId)
         if (anchor === undefined) continue
-        updatePin(pin, anchor)
-      }
-      painted = true
-      fanOut()
-      place()
-      if (started.size > 0) setTimeout(() => {
-        for (const key of started) {
-          finishing.delete(key)
-          pinned.get(key)?.node.classList.remove('work-finishing', 'work-disappearing')
+        let pin = pinned.get(elementId)
+        if (pin === undefined) {
+          const node = document.createElement('div')
+          node.className = 'pin'
+          node.innerHTML = `<div class="foot"></div><div class="stem"></div><div class="head"><svg class="ring" viewBox="0 0 40 40"></svg><div class="face">${BACKLOG_MARK}</div><span class="count"></span></div>`
+          const head = node.querySelector<HTMLElement>('.head')!
+          head.addEventListener('click', () => onOpen(elementId))
+          tip.attach(head)
+          layer.append(node)
+          pin = { node, anchor, tasks: new Set(), statuses: new Set() }
+          pinned.set(elementId, pin)
         }
-        fanOut()
-      }, WORK_BADGE_FINISH_MS)
+        const counts = stageCounts(group)
+        pin.anchor = anchor
+        pin.tasks = new Set(group.map(item => item.taskId))
+        pin.statuses = new Set(group.map(item => item.status))
+        pin.node.querySelector('.ring')!.innerHTML = ringArcs(counts)
+        pin.node.querySelector('.count')!.textContent = String(pin.tasks.size)
+        pin.node.querySelector<HTMLElement>('.head')!.dataset.tip = STAGES
+          .filter(({ stage }) => counts[stage] > 0)
+          .map(({ stage, label }) => `${label} ${counts[stage]}`).join(' · ')
+      }
+      filter()
+      place()
     },
     place(current) {
-      const scaleChanged = camera?.k !== current.k
       camera = current
-      place(scaleChanged)
+      place()
     },
     show(statuses) {
       enabledStatuses = statuses
-      fanOut()
+      filter()
     },
-    activate(active, selected) {
-      for (const pin of pins) {
-        const node = pinned.get(pin.key)?.node
-        node?.classList.toggle('active', active.includes(pin.taskId))
-        node?.classList.toggle('selected', pin.taskId === selected)
-      }
+    activate(active) {
+      for (const pin of pinned.values()) pin.node.classList.toggle('active', active.some(task => pin.tasks.has(task)))
     },
   }
 }

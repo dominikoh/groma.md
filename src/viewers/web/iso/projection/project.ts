@@ -61,6 +61,11 @@ function planeAxes(view: ProjectionView): Record<Plane, [Point, Point]> {
   }
 }
 
+/** Screen vectors of one ground-plane pixel along +gx and +gy. */
+export function groundAxes(view: ProjectionView = DEFAULT_PROJECTION): [Point, Point] {
+  return planeAxes(view).ground
+}
+
 /** The SVG matrix that lays a plane's pixels onto the screen with the plane's origin at `origin`. */
 export function planeMatrix(
   plane: Plane,
