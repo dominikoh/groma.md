@@ -333,7 +333,9 @@ for (const mode of ['iso', '2d'] as const) {
     for (const { rect, polygon, text } of surfaces) {
       const origin = groundPoint(text.origin, scene.view)
       const body = screenBox(polygon.map(point => groundPoint(point, scene.view)))
-      assert.ok(Math.abs(origin.y - (body.y + body.height)) < 1e-8, 'leader starts on the boundary')
+      // An empty container's name sits inside its box, centred; every other name hangs from its lower boundary.
+      if (text.inside) assert.ok(origin.y > body.y && origin.y < body.y + body.height, 'an inside label stays in its box')
+      else assert.ok(Math.abs(origin.y - (body.y + body.height)) < 1e-8, 'leader starts on the boundary')
       assert.ok(Math.abs(origin.x + text.width / (2 * PLANE) - (rect.gx + rect.w / 2)) < 1e-8, 'label anchor is centered')
     }
     const roofs = scene.buildings.flatMap(item => item.floors.flatMap(floor => floor

@@ -9,6 +9,7 @@ import {
   type FlatRoute,
   type Point,
 } from '../src/sheet/route/geometry.ts'
+import { ISLAND_FONT, labelBand, slabBand } from '../src/sheet/measure.ts'
 import { ROUTE_CLEARANCE, ROUTE_UNIT } from '../src/sheet/route/space.ts'
 import { artifactRouteIds, orthogonal, sharedPathMeasure, crossingRouteIdsFor } from '../src/sheet/route/checks.ts'
 import { routeAll } from '../src/sheet/route/route.ts'
@@ -22,14 +23,14 @@ import { openclawFixtureRoot, viewerFixtureRoot } from './helpers.ts'
 function endpointsOf(scene: SheetScene): Map<string, Endpoint> {
   const endpoints = new Map<string, Endpoint>()
   for (const island of scene.islands) {
-    endpoints.set(island.key, { key: island.key, kind: 'island', rect: island.rect })
+    endpoints.set(island.key, { key: island.key, kind: 'island', rect: { ...island.rect, d: island.rect.d - labelBand(ISLAND_FONT) } })
     if (island.element) endpoints.set(island.element.representationId, endpoints.get(island.key)!)
   }
   for (const slab of scene.slabs) {
     endpoints.set(slab.representationId, {
       key: slab.representationId,
       kind: 'slab',
-      rect: slab.rect,
+      rect: { ...slab.rect, d: slab.rect.d - slabBand(slab) },
       owner: slab.island,
     })
   }
@@ -384,4 +385,74 @@ test.concurrent('routing fails clearly when a relationship names an element that
     description: 'uses',
     origin: 'observed',
   }]))
+})
+
+test.concurrent('a route between walls that overlap only off their middles still runs straight', () => {
+  const endpoints = new Map<string, Endpoint>([
+    ['source', { key: 'source', kind: 'building', rect: { gx: 0, gy: 0, w: 6, d: 12 } }],
+    ['target', { key: 'target', kind: 'building', rect: { gx: 14, gy: 8, w: 6, d: 12 } }],
+  ])
+  const [route] = routeAll(endpoints, [{ id: 'relationship:0', source: 'source', target: 'target', description: 'uses', origin: 'observed' }])
+  assert.equal(route!.points.length, 2)
+  assert.equal(route!.points[0]!.gy, route!.points[1]!.gy)
+})
+
+test.concurrent('a route goes round a container that holds nothing instead of across it', () => {
+  const endpoints = new Map<string, Endpoint>([
+    ['island', { key: 'island', kind: 'island', rect: { gx: 0, gy: 0, w: 60, d: 30 } }],
+    ['left', { key: 'left', kind: 'slab', rect: { gx: 5, gy: 10, w: 8, d: 6 }, owner: 'island', solid: true }],
+    ['middle', { key: 'middle', kind: 'slab', rect: { gx: 25, gy: 10, w: 8, d: 6 }, owner: 'island', solid: true }],
+    ['right', { key: 'right', kind: 'slab', rect: { gx: 45, gy: 10, w: 8, d: 6 }, owner: 'island', solid: true }],
+  ])
+  const [route] = routeAll(endpoints, [{ id: 'relationship:0', source: 'left', target: 'right', description: 'uses', origin: 'observed' }])
+  const middle = { x0: 25, x1: 33, y0: 10, y1: 16 }
+  for (let index = 1; index < route!.points.length; index += 1) {
+    const [a, b] = [route!.points[index - 1]!, route!.points[index]!]
+    const through = Math.max(a.gx, b.gx) > middle.x0 && Math.min(a.gx, b.gx) < middle.x1
+      && Math.max(a.gy, b.gy) > middle.y0 && Math.min(a.gy, b.gy) < middle.y1
+    assert.equal(through, false, JSON.stringify(route!.points))
+  }
+})
+
+test.concurrent('a route goes round an external island that holds neither of its ends when that costs little', () => {
+  const endpoints = new Map<string, Endpoint>([
+    ['island:actors', { key: 'island:actors', kind: 'island', rect: { gx: 0, gy: 0, w: 8, d: 20 } }],
+    ['person', { key: 'person', kind: 'building', rect: { gx: 2, gy: 8, w: 4, d: 4 }, owner: 'island:actors' }],
+    ['island:external', { key: 'island:external', kind: 'island', rect: { gx: 12, gy: 4, w: 14, d: 14 } }],
+    ['other', { key: 'other', kind: 'building', rect: { gx: 14, gy: 5, w: 3, d: 3 }, owner: 'island:external' }],
+    ['service', { key: 'service', kind: 'building', rect: { gx: 34, gy: 24, w: 4, d: 4 } }],
+  ])
+  const [route] = routeAll(endpoints, [{ id: 'relationship:0', source: 'person', target: 'service', description: 'uses', origin: 'observed' }])
+  const island = { x0: 12, x1: 26, y0: 4, y1: 18 }
+  for (let index = 1; index < route!.points.length; index += 1) {
+    const [a, b] = [route!.points[index - 1]!, route!.points[index]!]
+    const across = Math.max(a.gx, b.gx) > island.x0 && Math.min(a.gx, b.gx) < island.x1
+      && Math.max(a.gy, b.gy) > island.y0 && Math.min(a.gy, b.gy) < island.y1
+    assert.equal(across, false, JSON.stringify(route!.points))
+  }
+})
+
+test.concurrent('a person below another joins its line round an external island instead of threading through it', () => {
+  // A person below another had only a narrow gap through the external systems.
+  const endpoints = new Map<string, Endpoint>([
+    ['island:actors', { key: 'island:actors', kind: 'island', rect: { gx: 4, gy: 4, w: 10.25, d: 31.25 } }],
+    ['admin', { key: 'admin', kind: 'building', rect: { gx: 6.625, gy: 6.125, w: 5, d: 5 }, owner: 'island:actors' }],
+    ['user', { key: 'user', kind: 'building', rect: { gx: 6.625, gy: 14.125, w: 4, d: 4 }, owner: 'island:actors' }],
+    ['island:external', { key: 'island:external', kind: 'island', rect: { gx: 17.25, gy: 9, w: 30, d: 25 } }],
+    ['harness', { key: 'harness', kind: 'building', rect: { gx: 19.25, gy: 11, w: 25, d: 5 }, owner: 'island:external' }],
+    ['app', { key: 'app', kind: 'building', rect: { gx: 19.25, gy: 19, w: 26, d: 5 }, owner: 'island:external' }],
+    ['service', { key: 'service', kind: 'building', rect: { gx: 50.25, gy: 9, w: 31, d: 6 } }],
+  ])
+  const routes = routeAll(endpoints, [
+    { id: 'relationship:0', source: 'admin', target: 'service', description: 'uses', origin: 'observed' },
+    { id: 'relationship:1', source: 'user', target: 'service', description: 'uses', origin: 'observed' },
+  ])
+  const user = routes.find(route => route.source === 'user')!
+  const island = { x0: 17.25, x1: 47.25, y0: 9, y1: 34 }
+  for (let index = 1; index < user.points.length; index += 1) {
+    const [a, b] = [user.points[index - 1]!, user.points[index]!]
+    const across = Math.max(a.gx, b.gx) > island.x0 && Math.min(a.gx, b.gx) < island.x1
+      && Math.max(a.gy, b.gy) > island.y0 && Math.min(a.gy, b.gy) < island.y1
+    assert.equal(across, false, JSON.stringify(user.points))
+  }
 })

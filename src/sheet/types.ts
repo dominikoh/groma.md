@@ -45,8 +45,10 @@ export interface Zone {
 /** A container: a slab level with its system island. */
 export interface Slab extends SheetItem {
   island: string
-  /** Packed envelope including the external label band along +gy. */
+  /** Packed envelope including the external label band along +gy, or the whole box when the slab is empty. */
   rect: CellRect
+  /** Holds nothing: painted as a plain box over its whole rect, with its name inside instead of in a band below. */
+  empty?: true
 }
 
 /** A component's block; an actor's round building; an external system's pill. */

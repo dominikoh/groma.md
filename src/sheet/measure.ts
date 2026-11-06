@@ -70,6 +70,11 @@ export function labelBand(size: number): number {
   return Math.ceil(labelHeight(size * 3) / PLANE)
 }
 
+/** The label band under a container; one that holds nothing shows its name inside its box and keeps no band. */
+export function slabBand(slab: { empty?: true }): number {
+  return slab.empty ? 0 : labelBand(CONTAINER_FONT)
+}
+
 /** Cells a surface needs along +gx so its own name fits in its front band. */
 export function nameCells(name: string, size: number, spacing = 0): number {
   return Math.ceil((textWidth(name, size, spacing) + 2 * SURFACE_PAD) / PLANE)

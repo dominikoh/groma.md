@@ -1,4 +1,4 @@
-import { BEND, CROSSING, CROWDING, JOINED_LENGTH, OTHER_WALL, OVERFLOW } from './costs.ts'
+import { BEND, CROSSING, CROWDING, FOREIGN_LENGTH, JOINED_LENGTH, OTHER_WALL, OVERFLOW } from './costs.ts'
 import { EAST, NORTH, SOUTH, WEST, exitDirection, type RouteGraph } from './graph.ts'
 import type { Point, PortPair, RouteRequest } from './geometry.ts'
 import { LineRuns, type LineRun, type RunEnds } from './order.ts'
@@ -65,6 +65,8 @@ const wallCost = (choice: PortChoice): number => choice.preferred ? 0 : OTHER_WA
  * round the stretch.
  */
 export class RoutePaths {
+  /** What crossing another route costs; a later pass raises it to pull crossing routes apart. */
+  crossing = CROSSING
   private graph: RouteGraph
   private choices: readonly PortChoices[]
   /** Routes on each edge, indexed like `graph.capacity`. */
@@ -99,14 +101,15 @@ export class RoutePaths {
   private edgeRoutes = new Map<number, number[]>()
   /** The route being searched or priced. */
   private current = -1
-  /** Whether two routes share a source or a target and so may run as one line. */
+  /** Whether two routes share an end, in either role, and so may run as one line. */
   private joinsRoute: (a: number, b: number) => boolean
 
   constructor(graph: RouteGraph, choices: readonly PortChoices[], requests: readonly Pick<RouteRequest, 'source' | 'target'>[] = []) {
     this.graph = graph
     this.choices = choices
     this.joinsRoute = (a, b) => a !== b && requests[a] !== undefined && requests[b] !== undefined
-      && (requests[a]!.source === requests[b]!.source || requests[a]!.target === requests[b]!.target)
+      && (requests[a]!.source === requests[b]!.source || requests[a]!.target === requests[b]!.target
+        || requests[a]!.source === requests[b]!.target || requests[a]!.target === requests[b]!.source)
     this.placed.joined = route => this.joinsRoute(this.current, route)
     this.loads = new Uint16Array(graph.x.length * 2)
     this.straight = new Uint16Array(graph.x.length * 2)
@@ -221,8 +224,17 @@ export class RoutePaths {
   /** The length a move pays: a stretch a joined route already takes costs less, so joined routes merge early. */
   private length(from: number, direction: number, to: number): number {
     const step = this.step(from, to)
-    return this.joinedOn(this.edge(from, direction)) > 0 ? step * JOINED_LENGTH : step
+    const own = this.joinedOn(this.edge(from, direction)) > 0 ? step * JOINED_LENGTH : step
+    const x = (this.graph.x[from]! + this.graph.x[to]!) / 2
+    const y = (this.graph.y[from]! + this.graph.y[to]!) / 2
+    return this.foreign(this.current, x, y) ? own * FOREIGN_LENGTH : own
   }
+
+  /** Whether route `a` may run along the port track route `b` leaves by, to join it. */
+  joinsTrack: (a: number, b: number) => boolean = () => false
+
+  /** Whether a point lies on an actors or external island that holds neither end of the route. */
+  foreign: (route: number, x: number, y: number) => boolean = () => false
 
   /**
    * Extra cost of one more route along the edge from `from` toward `direction`, which then holds `load` routes: crowding
@@ -287,13 +299,13 @@ export class RoutePaths {
     direction: number, to: number, load?: number): number {
     const base = this.length(node, direction, to) + this.crowding(node, direction, load)
     // Going straight crosses the routes that run straight through the node on the other axis.
-    if (direction === heading) return base + CROSSING * this.straight[node * 2 + (axisOf(heading) ^ 1)]!
-    return base + BEND + CROSSING * this.stretchCrossings(join, node, heading, before, direction, carried)
+    if (direction === heading) return base + this.crossing * this.straight[node * 2 + (axisOf(heading) ^ 1)]!
+    return base + BEND + this.crossing * this.stretchCrossings(join, node, heading, before, direction, carried)
   }
 
   /** Cost of a last stretch that enters a target guard at `to` heading `direction`: its wall and its crossings. */
   private arrival(to: number, direction: number, join: number, before: number, carried: ReadonlyMap<number, number> | undefined): number {
-    return this.goals[this.goalAt[to]!]!.cost + CROSSING * this.stretchCrossings(join, to, direction, before, -1, carried)
+    return this.goals[this.goalAt[to]!]!.cost + this.crossing * this.stretchCrossings(join, to, direction, before, -1, carried)
   }
 
   private cost(path: Path, index: number): number {
@@ -316,7 +328,7 @@ export class RoutePaths {
       }
       heading = direction
     }
-    return total + CROSSING * this.stretchCrossings(join, nodes.at(-1)!, heading, before, -1, carried)
+    return total + this.crossing * this.stretchCrossings(join, nodes.at(-1)!, heading, before, -1, carried)
   }
 
   private isGoal(node: number): boolean {
@@ -349,7 +361,8 @@ export class RoutePaths {
     if (to < 0 || (this.isGoal(to) && direction !== this.goals[this.goalAt[to]!]!.entry)) return -1
     const edge = this.edge(node, direction)
     const owners = this.graph.owners[edge]
-    if (owners && !owners.includes(index)) return -1
+    // Another route's port track is closed, except where that route leaves for this route's target: the two may join.
+    if (owners && !owners.includes(index) && !this.graph.leaving[edge]?.some(owner => this.joinsTrack(index, owner))) return -1
     const load = this.load(edge)
     return this.overfill || load <= this.graph.capacity[edge]! ? load : -1
   }

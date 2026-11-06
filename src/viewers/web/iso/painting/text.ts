@@ -76,7 +76,7 @@ export function surfaceLabel(
   const layout = surfaceLabelLayout(text, size, zoom, view)
   return node('g', { transform: planeMatrix('ground', text.origin, view) }, 'label surface-label', [
     node('rect', { x: layout.x, width: layout.width, height: layout.height }, 'label-hit'),
-    node('line', { x1: text.width / 2, x2: text.width / 2, y1: 0, y2: layout.leader }, 'label-leader'),
+    ...(text.inside ? [] : [node('line', { x1: text.width / 2, x2: text.width / 2, y1: 0, y2: layout.leader }, 'label-leader')]),
     node('text', {
       x: text.width / 2,
       y: layout.baseline,

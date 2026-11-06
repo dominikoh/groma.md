@@ -28,6 +28,13 @@ export interface Endpoint {
   rect: CellRect
   owner?: string
   roof?: number
+  /** A slab or island that holds nothing is painted as a plain box: routes go round it as they go round a building. */
+  solid?: true
+}
+
+/** Whether routes must go round an endpoint rather than across it. */
+export function isObstacle(endpoint: Endpoint): boolean {
+  return endpoint.kind === 'building' || endpoint.solid === true
 }
 
 export type RouteRequest = Pick<AnnotatedRelationship, 'id' | 'source' | 'target' | 'description' | 'origin'> & { relationshipIds?: string[] }
@@ -67,4 +74,32 @@ export function inside(point: Point, polygon: readonly Point[]): boolean {
       && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x) contained = !contained
   }
   return contained
+}
+
+/**
+ * The actors and external islands a route between `source` and `target` should not cross: those holding neither end.
+ * Their buildings are obstacles anyway; this keeps a route from threading between them. In plane units.
+ */
+export function foreignIslands(endpoints: ReadonlyMap<string, Endpoint>, source: string, target: string)
+  : { x: number; y: number; width: number; height: number }[] {
+  const own = new Set([source, target].flatMap(id => [id, endpoints.get(id)?.owner ?? id]))
+  return [...endpoints.values()]
+    .filter(endpoint => endpoint.kind === 'island' && !endpoint.solid && !own.has(endpoint.key)
+      && (endpoint.key === 'island:actors' || endpoint.key === 'island:external'))
+    .map(endpoint => rectOf(endpoint.rect))
+}
+
+/** How much of a route runs inside islands it should not cross (see foreignIslands), in plane units. */
+export function foreignLength(endpoints: ReadonlyMap<string, Endpoint>, route: Pick<FlatRoute, 'source' | 'target' | 'points'>): number {
+  let total = 0
+  for (const island of foreignIslands(endpoints, route.source, route.target)) {
+    for (let index = 1; index < route.points.length; index += 1) {
+      const [a, b] = [route.points[index - 1]!, route.points[index]!]
+      const [x0, x1] = [Math.max(Math.min(a.x, b.x), island.x), Math.min(Math.max(a.x, b.x), island.x + island.width)]
+      const [y0, y1] = [Math.max(Math.min(a.y, b.y), island.y), Math.min(Math.max(a.y, b.y), island.y + island.height)]
+      if (a.y === b.y && a.y > island.y && a.y < island.y + island.height) total += Math.max(0, x1 - x0)
+      else if (a.x === b.x && a.x > island.x && a.x < island.x + island.width) total += Math.max(0, y1 - y0)
+    }
+  }
+  return total
 }

@@ -8,11 +8,12 @@ import { ROUTE_UNIT } from './space.ts'
 /** A bend costs three cells of length. More gives routes with fewer bends that take longer ways round. */
 export const BEND = ROUTE_UNIT * 3
 /**
- * Crossing another route costs ten bends: a crossing is the hardest thing to read on a dense map, so a route goes round
- * a building or two before it cuts through others. Measured on dense maps, doubling it from five bends removed a
- * tenth to a quarter of the crossings for 6-20% more route length. More gives fewer crossings and longer detours.
+ * Crossing another route costs five bends: a route may cut across others rather than go round a building or a slab to
+ * avoid them. Ten bends removed a tenth to a third of the crossings on dense maps but sent routes on long detours round
+ * whole slabs (a private service's Component map: 1421 cells against 1311 at five, Backlog.md's 5377 against 4492). More gives fewer
+ * crossings and longer detours.
  */
-export const CROSSING = BEND * 10
+export const CROSSING = BEND * 5
 /** Leaving or entering by a wall other than the preferred one; another wall wins only where it saves crossings or length. */
 export const OTHER_WALL = BEND / 4
 /**
@@ -27,3 +28,15 @@ export const OVERFLOW = BEND * 40
  * routes into one element, or out of one, ride a common trunk as early as they can instead of running side by side.
  */
 export const JOINED_LENGTH = 0.8
+/**
+ * After every route is found, each is searched once more with a crossing priced this many times higher, so a route
+ * that crosses others takes another way where that costs little; routes that cross nothing keep their way. Measured at
+ * two and four times: two took Backlog.md's Component map from 89 to 73 crossings for 12% more length; four cost 50%
+ * more length.
+ */
+export const UNTANGLE = 2
+/**
+ * A route across an actors or external island that holds neither of its ends pays this many times the length there,
+ * so it goes round another island's buildings instead of threading between them.
+ */
+export const FOREIGN_LENGTH = 1.5

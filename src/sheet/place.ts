@@ -1,7 +1,7 @@
 import { compareSemanticElements } from '../element-order.ts'
 import type { AnnotatedElement, AnnotatedRelationship, ArchitectureGraph } from '../types.ts'
 import { composePlacement } from './compose.ts'
-import { GAP, ISLAND_GAP, NESTED_CONTENT_PAD } from './forces.ts'
+import { GAP, ISLAND_GAP, NESTED_CONTENT_PAD, SIBLING_SPREAD } from './forces.ts'
 import { MARGIN, PAD, shadeOf, translate, unionRects } from './grid.ts'
 import {
   ISLAND_FONT,
@@ -17,7 +17,7 @@ import {
   nameCells,
   roofLines,
 } from './measure.ts'
-import { grow, shelf } from './pack.ts'
+import { grow, layered, shelf } from './pack.ts'
 import { balance } from './pack-forces.ts'
 import type { Partnered, PartnerLink } from './pack.ts'
 import { flowRanks } from './rank.ts'
@@ -87,11 +87,38 @@ function buildingNode(element: AnnotatedElement, ranges: FileMeasureRanges, degr
   return { key: element.representationId, w, d, connections: degree, children: [], paint: { kind: 'building', element, heightUnits, shape, floors, lines } }
 }
 
+/** A component more than this many times its group's median area keeps its own size instead of the shared one. */
+const SIZE_OUTLIER = 1.5
+
+/**
+ * Components in one group, or loose on one surface, stand as peers of one size: each grows to the largest of them,
+ * its ground floor with it, leaving out one whose area is over SIZE_OUTLIER times the median (a long name or a large
+ * file keeps its own size).
+ */
+function sharedSizes(nodes: readonly Node[], groupOf: (node: Node) => string): Node[] {
+  const shared = new Map<string, { w: number; d: number }>()
+  for (const group of Map.groupBy(nodes, groupOf).values()) {
+    const areas = group.map(node => node.w * node.d).sort((a, b) => a - b)
+    const median = (areas[Math.floor((areas.length - 1) / 2)]! + areas[Math.ceil((areas.length - 1) / 2)]!) / 2
+    const peers = group.filter(node => node.w * node.d <= SIZE_OUTLIER * median)
+    const size = { w: Math.max(...peers.map(node => node.w)), d: Math.max(...peers.map(node => node.d)) }
+    for (const peer of peers) shared.set(peer.key, size)
+  }
+  return nodes.map(node => {
+    const size = shared.get(node.key)
+    if (!size || node.paint.kind !== 'building' || (size.w === node.w && size.d === node.d)) return node
+    const [ground, ...upper] = node.paint.floors
+    const floors = ground ? [{ ...ground, footprint: size }, ...upper] : []
+    return { ...node, ...size, paint: { ...node.paint, floors } }
+  })
+}
+
 /** Reserve a node's connection fan beyond the minimum gap already supplied by packing. */
 function routeMargin(node: Node): number {
   return Math.max(0, routeReach(node.connections) - GAP / 2)
 }
 
+/** Relationships that cross the surface's edge: only they need route room around it; inner ones keep their children's margins. */
 function subtreeConnections(key: string, children: readonly Node[], relationships: readonly Pick<AnnotatedRelationship, 'source' | 'target'>[]): number {
   const keys = new Set([key])
   const visit = (node: Node): void => {
@@ -99,7 +126,7 @@ function subtreeConnections(key: string, children: readonly Node[], relationship
     for (const child of node.children) visit(child.node)
   }
   for (const child of children) visit(child)
-  return relationships.filter(relationship => keys.has(relationship.source) || keys.has(relationship.target)).length
+  return relationships.filter(relationship => keys.has(relationship.source) !== keys.has(relationship.target)).length
 }
 
 /** The cells a surface's own name needs in its front band. */
@@ -162,7 +189,7 @@ function packed(
   relationships: readonly Pick<AnnotatedRelationship, 'source' | 'target'>[],
   stack = false,
 ): Node {
-  const { entries, partners } = lifted(children, relationships)
+  const { entries, edges, partners } = lifted(children, relationships)
   /**
    * A roof hides the ground to its north and west, so a building claims those
    * cells in the packing and stands that far inside the claim; only its
@@ -176,7 +203,10 @@ function packed(
     entry: entries.has(child.key),
     partners: partners.get(child.key)!,
   }))
-  const placed = stack ? shelf(items, 1) : balance(items, grow(items))
+  // A slab or zone of components that talk to each other lays them out as a flow, west to east.
+  const flows = (paint.kind === 'slab' || paint.kind === 'zone') && edges.size > 0
+    && children.every(child => child.paint.kind === 'building')
+  const placed = stack ? shelf(items, 1) : flows ? layered(items, edges, SIBLING_SPREAD) : balance(items, grow(items))
   /** Systems, slabs and zones share the roomier nested-surface inset; the centred actors and external islands stay compact. */
   const connections = subtreeConnections(key, children, relationships)
   const ownPorts = connectionCounts(relationships).get(key) ?? 0
@@ -258,7 +288,8 @@ export function placeWorld(world: ArchitectureGraph): Placement {
     const components = childrenOf(container.representationId).filter(child => child.kind === 'component')
     return packed(
       container.representationId,
-      withZones(container.representationId, components.map(building), components, relationships),
+      withZones(container.representationId, sharedSizes(components.map(building), node =>
+        components.find(component => component.representationId === node.key)!.group ?? ''), components, relationships),
       { kind: 'slab', element: container },
       relationships,
     )
@@ -298,7 +329,14 @@ export function placeWorld(world: ArchitectureGraph): Placement {
   const { entries, edges } = lifted(all, relationships)
   const ranks = flowRanks(all.map(island => island.key), entries, edges)
   const rankOf = (island: Node): number => ranks.get(island.key) ?? Number.MAX_SAFE_INTEGER
-  islands.push(...systemIslands.sort((a, b) => rankOf(a) - rankOf(b)), ...externalIslands)
+  // External systems that mostly call into the systems stand west of them, beside the actors, so their routes flow east.
+  const systemKeys = new Set(systemIslands.map(island => island.key))
+  const outgoing = (edges.get(EXTERNAL_ISLAND) ?? []).filter(key => systemKeys.has(key)).length
+  const incoming = [...systemKeys].reduce((total, key) =>
+    total + (edges.get(key) ?? []).filter(other => other === EXTERNAL_ISLAND).length, 0)
+  const callers = outgoing > incoming
+  islands.push(...(callers ? externalIslands : []), ...systemIslands.sort((a, b) => rankOf(a) - rankOf(b)),
+    ...(callers ? [] : externalIslands))
   return composePlacement(collect(islands, placeRow(islands, relationships)), relationships)
 }
 
@@ -366,7 +404,7 @@ function collect(islands: readonly Node[], origins: readonly CellRect[]): Placem
         rect,
       })
     } else if (paint.kind === 'slab') {
-      placement.slabs.push({ ...item(paint.element), island: islandKey, rect })
+      placement.slabs.push({ ...item(paint.element), island: islandKey, rect, ...(node.children.length === 0 ? { empty: true as const } : {}) })
     } else if (paint.kind === 'zone') {
       placement.zones.push({ key: node.key, name: paint.name, parent: surface, members: paint.members, rect,
         unidentifiedContainer: paint.unidentifiedContainer,

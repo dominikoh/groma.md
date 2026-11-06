@@ -3,7 +3,7 @@ import { test } from 'bun:test'
 
 import type { Building, Route, SheetScene } from '../src/sheet/types.ts'
 import { MORPH_DURATION_MS, MORPH_FASTEST_MS, sameSheet, tweenSheet } from '../src/viewers/web/iso/view-motion/morph.ts'
-import { createMapMotion, presentScene } from '../src/viewers/web/iso/view-motion/presentation.ts'
+import { createMapMotion, flattenSheet, presentScene } from '../src/viewers/web/iso/view-motion/presentation.ts'
 import { NESTED_POSE } from '../src/viewers/web/iso/view-motion/orbit.ts'
 import { labelBand, CONTAINER_FONT } from '../src/sheet/measure.ts'
 import { box, uses, worldOf } from './helpers.ts'
@@ -99,7 +99,7 @@ test.concurrent('a placement of a real world survives a tween into itself, from 
   const middle = tweenSheet(small.sheet, grown.sheet, 0.5)
   assert.equal(middle.buildings.length, 4)
   assert.equal(middle.routes.length, 3)
-  assert.ok(middle.slabs[0]!.rect.d > small.sheet.slabs[0]!.rect.d && middle.slabs[0]!.rect.d < grown.sheet.slabs[0]!.rect.d)
+  assert.ok(middle.slabs[0]!.rect.w > small.sheet.slabs[0]!.rect.w && middle.slabs[0]!.rect.w < grown.sheet.slabs[0]!.rect.w)
   // Surfaces growing out of nothing keep their label band, and every shape stays finite while tiny.
   const first = tweenSheet(worldOf([]).sheet, grown.sheet, 0.02)
   assert.ok(first.slabs[0]!.rect.d > labelBand(CONTAINER_FONT))
@@ -150,4 +150,11 @@ test.concurrent('reduced motion and an unchanged placement apply at once', () =>
   assert.equal(motion.sheet, after)
   assert.equal(motion.retarget(structuredClone(after), 10, true), false)
   assert.ok(!motion.morphing)
+})
+
+test.concurrent('a straight route into a roofed back wall stays straight on the flat plan', () => {
+  // b's west wall stands one cell west of its footprint under its roof; flattening settles that end onto the footprint.
+  const sheet = sheetOf([building('a', 6, 6), building('b', 20, 6)], [route('a-b', 'a', 'b', [{ gx: 10, gy: 7.5 }, { gx: 19, gy: 7.5 }])])
+  const [flat] = flattenSheet(sheet, 1).routes
+  assert.deepEqual(flat!.points, [{ gx: 10, gy: 8.5 }, { gx: 20, gy: 8.5 }])
 })

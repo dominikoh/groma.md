@@ -1,6 +1,7 @@
 import type { ProjectProfile } from '../../../../project-profile.ts'
 import { ROOF_SHADOW } from '../../../../sheet/grid.ts'
-import type { Building, RoutePoint, SheetScene } from '../../../../sheet/types.ts'
+import { ISLAND_FONT, labelBand, slabBand } from '../../../../sheet/measure.ts'
+import type { Building, CellRect, RoutePoint, SheetScene } from '../../../../sheet/types.ts'
 import type { LayerPose } from './orbit.ts'
 import { EXPLODED_POSE, NESTED_POSE, OVERHEAD_POSE, ORBIT_DURATION_MS, PLAN_DURATION_MS, interpolatePose, orbitPose } from './orbit.ts'
 import { sceneAtSeparation, type LayeredScene } from '../projection/separation.ts'
@@ -64,15 +65,47 @@ function flattenRouteEnd(points: RoutePoint[], building: Building | undefined, a
   return [end, bend, ...points.slice(join + 1)]
 }
 
+/**
+ * A straight route whose one end settles with its roof stays straight: the other end slides along its own wall by the
+ * same amount, when that wall reaches, instead of the route taking a step beside the roof.
+ */
+function settledStraight(points: readonly RoutePoint[], ends: readonly [Building | undefined, Building | undefined],
+  walls: readonly [CellRect | undefined, CellRect | undefined], amount: number): RoutePoint[] | undefined {
+  const [a, b] = points as [RoutePoint, RoutePoint]
+  const horizontal = a.gy === b.gy
+  const run = horizontal ? 'gx' : 'gy'
+  const along = horizontal ? 'gy' : 'gx'
+  const shiftAt = (at: RoutePoint, building: Building | undefined): number =>
+    building && at[run] < building.rect[run] ? building.heightUnits * ROOF_SHADOW * amount : 0
+  const shifts = [shiftAt(a, ends[0]), shiftAt(b, ends[1])] as const
+  if ((shifts[0] === 0) === (shifts[1] === 0)) return undefined
+  const moved = shifts[0] !== 0 ? 0 : 1
+  const shift = shifts[moved]!
+  const still = walls[1 - moved]
+  const value = a[along] + shift
+  const [low, high] = still ? [still[along], still[along] + (horizontal ? still.d : still.w)] : [Infinity, -Infinity]
+  if (value < low + 0.5 || value > high - 0.5) return undefined
+  return [a, b].map((point, index) => ({ ...point, [along]: value, [run]: point[run] + (index === moved ? shift : 0) }))
+}
+
 /** Flatten a presentation copy; the sheet and its source evidence remain untouched. */
-function flattenSheet(sheet: SheetScene, amount: number): SheetScene {
+export function flattenSheet(sheet: SheetScene, amount: number): SheetScene {
   if (amount === 0) return sheet
   const height = 1 - amount
   const buildings = new Map(sheet.buildings.map(building => [building.representationId, building]))
+  // The walls a route may end on: a building's footprint, a surface's painted body above its label band.
+  const walls = new Map<string, CellRect>([
+    ...sheet.islands.map(island => [island.key, { ...island.rect, d: island.rect.d - labelBand(ISLAND_FONT) }] as const),
+    ...sheet.slabs.map(slab => [slab.representationId, { ...slab.rect, d: slab.rect.d - slabBand(slab) }] as const),
+    ...sheet.buildings.map(building => [building.representationId, building.rect] as const),
+  ])
   return {
     ...sheet,
     routes: sheet.routes.map(route => {
       const points = [...route.points]
+      const straight = points.length === 2 ? settledStraight(points,
+        [buildings.get(route.source), buildings.get(route.target)], [walls.get(route.source), walls.get(route.target)], amount) : undefined
+      if (straight) return { ...route, points: straight }
       if (points.length === 2) {
         const middle = { gx: (points[0]!.gx + points[1]!.gx) / 2, gy: (points[0]!.gy + points[1]!.gy) / 2 }
         points.splice(1, 0, { ...middle }, { ...middle })

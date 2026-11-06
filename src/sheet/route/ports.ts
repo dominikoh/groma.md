@@ -1,6 +1,6 @@
 import { ROOF_SHADOW } from '../grid.ts'
-import { inside, rectOf, visibleObstacle, type Endpoint, type Point, type PortPair, type PortSide, type RoutePort, type RouteRequest } from './geometry.ts'
-import { PORT_SPAN, ROUTE_CLEARANCE, ROUTE_SPACING, ROUTE_UNIT } from './space.ts'
+import { inside, isObstacle, rectOf, visibleObstacle, type Endpoint, type Point, type PortPair, type PortSide, type RoutePort, type RouteRequest } from './geometry.ts'
+import { BUNDLE_SPACING, PORT_SPAN, ROUTE_CLEARANCE, ROUTE_SPACING, ROUTE_UNIT } from './space.ts'
 
 interface EndpointCandidate {
   request: RouteRequest
@@ -131,6 +131,14 @@ function portShare(index: number, count: number): number {
   return PORT_SPAN[0] + (PORT_SPAN[1] - PORT_SPAN[0]) * index / (count - 1)
 }
 
+/** Where slot `index` of `count` on one wall sits: around the middle of the wall, a bundle spacing apart. */
+function centredShare(candidate: EndpointCandidate, index: number, count: number): number {
+  const { width, height } = rectOf(candidate.endpoint.rect)
+  const length = candidate.side === 'north' || candidate.side === 'south' ? width : height
+  const share = 0.5 + (index - (count - 1) / 2) * BUNDLE_SPACING / length
+  return Math.min(PORT_SPAN[1], Math.max(PORT_SPAN[0], share))
+}
+
 /** External systems take one arriving route per wall where they have walls to spare. */
 function oneArrivalPerWall(endpoint: Endpoint, role: 'source' | 'target'): boolean {
   return role === 'target' && endpoint.owner === 'island:external'
@@ -252,34 +260,27 @@ function distributeClearPorts(
 }
 
 /**
- * Routes that leave one wall share one port, and so do routes that enter it: they leave or arrive as one line and part
- * only where their ways do. Leaving and arriving keep separate ports, ordered along the wall by their lanes.
+ * Every route on one wall, leaving or arriving, shares one port: they meet the wall as one line and part only where
+ * their ways do, so a route each way between two boxes draws as one line with an arrow at each end.
  */
 function pairsFrom(groups: ReadonlyMap<string, EndpointCandidate[]>): Map<string, Partial<PortPair>> {
   const pairs = new Map<string, Partial<PortPair>>()
   for (const group of groups.values()) {
-    group.sort((a, b) => laneCoordinate(a) - laneCoordinate(b) || a.request.id.localeCompare(b.request.id))
-    const lane = (members: readonly EndpointCandidate[]): number =>
-      members.reduce((total, candidate) => total + laneCoordinate(candidate), 0) / members.length
-    const slots = [...Map.groupBy(group, candidate => candidate.role).values()]
-      .sort((a, b) => lane(a) - lane(b) || a[0]!.request.id.localeCompare(b[0]!.request.id))
-    for (const [index, slot] of slots.entries()) {
-      for (const candidate of slot) {
-        const pair = pairs.get(candidate.request.id) ?? {}
-        pair[candidate.role] = portAt(candidate.endpoint, candidate.side, portShare(index, slots.length))
-        pairs.set(candidate.request.id, pair)
-      }
+    for (const candidate of group) {
+      const pair = pairs.get(candidate.request.id) ?? {}
+      pair[candidate.role] = portAt(candidate.endpoint, candidate.side, centredShare(candidate, 0, 1))
+      pairs.set(candidate.request.id, pair)
     }
   }
   return pairs
 }
 
-/** Assigns wall ports before routing: one port per endpoint wall for its leaving routes and one for its arriving routes. */
+/** Assigns wall ports before routing: one port per endpoint wall, shared by its leaving and arriving routes. */
 export function assignFixedPorts(
   endpoints: ReadonlyMap<string, Endpoint>,
   requests: readonly RouteRequest[],
 ): Map<string, Partial<PortPair>> {
-  const buildings = new PortObstacles([...endpoints.values()].filter(endpoint => endpoint.kind === 'building'))
+  const buildings = new PortObstacles([...endpoints.values()].filter(isObstacle))
   const candidates = routeCandidates(endpoints, requests, buildings)
   balanceSideLoads(candidates, buildings)
   return pairsFrom(distributeClearPorts(candidates, buildings))
@@ -339,7 +340,7 @@ export function portChoices(endpoints: ReadonlyMap<string, Endpoint>, requests: 
     if (!pair?.source || !pair.target) throw new Error(`No fixed ports for ${request.id}`)
     return { source: pair.source, target: pair.target }
   })
-  const buildings = new PortObstacles([...endpoints.values()].filter(endpoint => endpoint.kind === 'building'))
+  const buildings = new PortObstacles([...endpoints.values()].filter(isObstacle))
   const walls = new Map<string, number>()
   return requests.map((request, index) => {
     const source = endpoints.get(request.source)!

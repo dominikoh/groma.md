@@ -1,4 +1,4 @@
-import { EPSILON, inside, visibleObstacle, type Endpoint, type FlatRoute, type Point } from './geometry.ts'
+import { EPSILON, inside, isObstacle, visibleObstacle, type Endpoint, type FlatRoute, type Point } from './geometry.ts'
 import { runsOf, type Run } from './order.ts'
 import { LANE_GAP, ROUTE_SPACING, ROUTE_UNIT } from './space.ts'
 
@@ -9,9 +9,9 @@ function closeLength(a: Run, b: Run, spacing: number): number {
   return length < EPSILON ? 0 : length
 }
 
-/** Two routes sharing a source or a target may run as one line: they join, they do not overlap. */
+/** Two routes sharing an end, in either role, may run as one line: they join, they do not overlap. */
 export function joinedRoutes(a: Pick<FlatRoute, 'id' | 'source' | 'target'>, b: Pick<FlatRoute, 'id' | 'source' | 'target'>): boolean {
-  return a.id !== b.id && (a.source === b.source || a.target === b.target)
+  return a.id !== b.id && (a.source === b.source || a.target === b.target || a.source === b.target || a.target === b.source)
 }
 
 /**
@@ -167,7 +167,7 @@ export function crossingRouteIdsFor(
   clearance = 0,
 ): (routes: readonly FlatRoute[]) => string[] {
   const obstacles = [...endpoints.values()]
-    .filter(endpoint => endpoint.kind === 'building')
+    .filter(isObstacle)
     .map(endpoint => {
       const polygon = visibleObstacle(endpoint, clearance)
       const xs = polygon.map(point => point.x)

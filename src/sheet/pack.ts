@@ -1,6 +1,7 @@
 import { FOLD_ASPECT, GAP } from './forces.ts'
 import { EMPTY, PAD, unionRects } from './grid.ts'
 import { PackingPaths } from './pack-paths.ts'
+import { flowRanks } from './rank.ts'
 import type { CellRect } from './types.ts'
 
 export interface ShelfItem {
@@ -199,6 +200,55 @@ export function grow(items: readonly Partnered[]): Shelf {
   const state = { rects, paths: new PackingPaths(items, rects), westEdge: entries.length > 0 ? PAD : -Infinity }
   placeConnected(connected, state)
   placeLoose(loose, rects)
+  return shelfAround(rects)
+}
+
+/**
+ * Layered placement, the usual layout of a flow: columns west to east by the longest chain from the entries
+ * (flowRanks), each column ordered by the mean row of its partners over a few alternating sweeps, and each child set
+ * level with the placed partners it talks to, never overlapping the one above it. Children no relationship touches
+ * are shelf-packed east of the columns. The same items always give the same placement.
+ */
+export function layered(items: readonly Partnered[], edges: ReadonlyMap<string, readonly string[]>, columnGap: number): Shelf {
+  const byKey = new Map(items.map(item => [item.key, item]))
+  const ranks = flowRanks(items.map(item => item.key), new Set(items.filter(item => item.entry).map(item => item.key)), edges)
+  const columns: string[][] = []
+  for (const item of items) if (ranks.has(item.key)) (columns[ranks.get(item.key)!] ??= []).push(item.key)
+  const dense = columns.filter(column => column !== undefined)
+  const row = new Map<string, number>()
+  const index = (): void => { for (const column of dense) column.forEach((key, at) => row.set(key, at / Math.max(1, column.length - 1))) }
+  index()
+  for (let sweep = 0; sweep < 4; sweep++) {
+    for (const column of sweep % 2 === 0 ? dense : [...dense].reverse()) {
+      const mean = new Map(column.map(key => {
+        const others = [...byKey.get(key)!.partners].filter(([other]) => row.has(other) && !column.includes(other))
+        const weight = others.reduce((sum, [, links]) => sum + links.length, 0)
+        return [key, weight > 0 ? others.reduce((sum, [other, links]) => sum + row.get(other)! * links.length, 0) / weight : row.get(key)!] as const
+      }))
+      column.sort((a, b) => mean.get(a)! - mean.get(b)! || row.get(a)! - row.get(b)!)
+      index()
+    }
+  }
+  const rects = new Map<string, CellRect>()
+  let x = 0
+  for (const column of dense) {
+    const width = Math.max(...column.map(key => byKey.get(key)!.w))
+    let floor = Number.NEGATIVE_INFINITY
+    for (const key of column) {
+      const item = byKey.get(key)!
+      const partners = [...item.partners].filter(([other]) => rects.has(other))
+        .map(([other, links]) => ({ rect: rects.get(other)!, links }))
+      const weight = partners.reduce((sum, partner) => sum + partner.links.length, 0)
+      const wanted = weight > 0
+        ? Math.round(partners.reduce((sum, partner) => sum + partner.links.length * alignment(partner).y, 0) / weight - item.d / 2)
+        : floor === Number.NEGATIVE_INFINITY ? 0 : floor
+      const gy = Math.max(wanted, floor)
+      rects.set(key, { gx: x + Math.round((width - item.w) / 2), gy, w: item.w, d: item.d })
+      floor = gy + item.d + GAP
+    }
+    x += width + columnGap
+  }
+  placeLoose(items.filter(item => !ranks.has(item.key)), rects)
   return shelfAround(rects)
 }
 

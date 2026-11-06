@@ -10,6 +10,8 @@ const SURFACE_INSET = 2
 const UNIT_GAP = 3
 const MIN_COLUMN_GAP = 2
 const ACTORS = 'island:actors'
+/** Cells a crossing of two centre lines costs when components swap places: a crossing outweighs a few cells of length. */
+const SWAP_CROSSING = 30
 
 interface Connection {
   source: string
@@ -162,7 +164,14 @@ export function containerFlow(
     return left.rect.gy - right.rect.gy || a.localeCompare(b)
   })
   if (entries.length === 0) return null
-  const entryIds = new Set(entries)
+  // An entry that another entry reaches stands behind it, so it can be the intermediate that turns packing into columns.
+  const edges = new Map<string, string[]>()
+  for (const connection of flow) {
+    if (unitIds.has(connection.source) && unitIds.has(connection.target)) {
+      edges.set(connection.source, [...(edges.get(connection.source) ?? []), connection.target])
+    }
+  }
+  const entryIds = new Set(layeredEntries(entries, flow, edges))
   const reached = entryReachableUnits(entryIds, unitIds, flow)
   // Only an entry-reachable intermediate container can turn packing into columns.
   const onward = flow.filter(connection => reached.has(connection.source) && !entryIds.has(connection.source))
@@ -238,11 +247,11 @@ function applyPositions(
  * Entries in order of the actor traffic they take; an entry another entry already reaches through the
  * system's own containers stands where that flow puts it instead.
  */
-function layeredEntries(flow: ContainerFlow, edges: ReadonlyMap<string, readonly string[]>): string[] {
-  const actorWeight = (id: string): number => flow.connections
+function layeredEntries(entries: readonly string[], connections: readonly Connection[], edges: ReadonlyMap<string, readonly string[]>): string[] {
+  const actorWeight = (id: string): number => connections
     .filter(connection => connection.source === ACTORS && connection.target === id)
     .reduce((total, connection) => total + connection.weight, 0)
-  const ordered = [...flow.entries].sort((a, b) => actorWeight(b) - actorWeight(a))
+  const ordered = [...entries].sort((a, b) => actorWeight(b) - actorWeight(a))
   const kept: string[] = []
   const reached = new Set<string>()
   for (const entry of ordered) {
@@ -279,7 +288,7 @@ function layeredColumns(units: readonly string[], flow: ContainerFlow, initialY:
     }
   }
   const order = [...units].sort((a, b) => initialY.get(a)! - initialY.get(b)! || a.localeCompare(b))
-  const ranks = flowRanks(order, new Set(layeredEntries(flow, edges)), edges)
+  const ranks = flowRanks(order, new Set(layeredEntries(flow.entries, flow.connections, edges)), edges)
   const last = Math.max(-1, ...ranks.values()) + 1
   const columns: string[][] = []
   for (const id of order) {
@@ -344,7 +353,9 @@ function composeSystem(
       const placed = connectedCentreY(id, new Set(positions.keys()), flow.connections, positions)
       const wanted = placed.weight > 0 ? placed.total / placed.weight - rect.d / 2 : floor === Number.NEGATIVE_INFINITY ? 0 : floor
       const gy = floor === Number.NEGATIVE_INFINITY ? wanted : Math.max(wanted, floor)
-      positions.set(id, { ...rect, gx: x + (width - rect.w) / 2, gy })
+      // An empty container takes its column's width, so the boxes of one column line up.
+      const w = units.get(id)!.empty ? width : rect.w
+      positions.set(id, { ...rect, w, gx: x + (width - w) / 2, gy })
       floor = gy + rect.d + unitGap
     }
     x += width + columnGap
@@ -360,6 +371,128 @@ function composeSystem(
   return island.rect.w - originalWidth
 }
 
+/**
+ * Slides the actors and external islands along gy again once the systems are composed, so the centre of their
+ * buildings faces the centre of what those buildings talk to where it finally stands. They never move above the
+ * sheet margin.
+ */
+function faceSideIslands(
+  placement: Placement,
+  relationships: readonly Pick<AnnotatedRelationship, 'source' | 'target'>[],
+): void {
+  const membership = islandMembership(placement)
+  const islandOf = (id: string): string | undefined => membership.buildingIsland.get(id)
+    ?? placement.islands.find(island => island.key === id || island.element?.representationId === id)?.key
+    ?? placement.slabs.find(slab => slab.representationId === id)?.island
+  const rects = new Map([
+    ...placement.islands.flatMap(island => [[island.key, island.rect] as const,
+      ...(island.element ? [[island.element.representationId, island.rect] as const] : [])]),
+    ...placement.slabs.map(slab => [slab.representationId, slab.rect] as const),
+    ...placement.buildings.map(building => [building.representationId, building.rect] as const),
+  ])
+  const centreY = (id: string): number => centre(rects.get(id)!).y
+  // The buildings stacked on an actors or external island stand in the order of the mean row of what they talk to,
+  // keeping their gaps, so their routes leave the island without crossing each other.
+  for (const island of placement.islands) {
+    if (island.kind === 'system') continue
+    const members = placement.buildings
+      .filter(building => membership.buildingIsland.get(building.representationId) === island.key)
+      .sort((a, b) => a.rect.gy - b.rect.gy)
+    if (members.length < 2) continue
+    const wanted = new Map(members.map(member => {
+      const rows = relationships.flatMap(({ source, target }) => {
+        const other = source === member.representationId ? target : target === member.representationId ? source : undefined
+        return other !== undefined && islandOf(other) !== island.key && rects.has(other) ? [centreY(other)] : []
+      })
+      return [member, rows.length > 0 ? rows.reduce((sum, row) => sum + row, 0) / rows.length : centre(member.rect).y] as const
+    }))
+    const gaps = members.slice(1).map((member, index) => member.rect.gy - members[index]!.rect.gy - members[index]!.rect.d)
+    let gy = members[0]!.rect.gy
+    ;[...members].sort((a, b) => wanted.get(a)! - wanted.get(b)! || a.rect.gy - b.rect.gy).forEach((member, index) => {
+      member.rect.gy = gy
+      gy += member.rect.d + (gaps[index] ?? 0)
+    })
+  }
+  for (const island of placement.islands) {
+    if (island.kind === 'system') continue
+    let shift = 0
+    let count = 0
+    for (const { source, target } of relationships) {
+      const inside = islandOf(source) === island.key
+      if (inside === (islandOf(target) === island.key) || !rects.has(source) || !rects.has(target)) continue
+      shift += inside ? centreY(target) - centreY(source) : centreY(source) - centreY(target)
+      count += 1
+    }
+    if (count === 0) continue
+    const dy = Math.max(MARGIN - island.rect.gy, Math.round(shift / count))
+    if (dy !== 0) moveIsland(placement, island.key, 0, dy, membership)
+  }
+}
+
+/**
+ * Swaps components of one size on one zone or surface while that brings them nearer what they talk to: the sum of
+ * centre distances over their relationships falls with every swap, so routes get shorter and cross less. Swaps run in
+ * a fixed order until none helps, so the same world always gives the same places.
+ */
+function swapPeers(
+  placement: Placement,
+  relationships: readonly Pick<AnnotatedRelationship, 'source' | 'target'>[],
+): void {
+  const rects = new Map([
+    ...placement.islands.flatMap(island => [[island.key, island.rect] as const,
+      ...(island.element ? [[island.element.representationId, island.rect] as const] : [])]),
+    ...placement.slabs.map(slab => [slab.representationId, slab.rect] as const),
+    ...placement.buildings.map(building => [building.representationId, building.rect] as const),
+  ])
+  const touching = new Map<string, Pick<AnnotatedRelationship, 'source' | 'target'>[]>()
+  for (const relationship of relationships) {
+    for (const end of [relationship.source, relationship.target]) touching.set(end, [...(touching.get(end) ?? []), relationship])
+  }
+  const placed = relationships.filter(({ source, target }) => rects.has(source) && rects.has(target))
+  const line = ({ source, target }: Pick<AnnotatedRelationship, 'source' | 'target'>) =>
+    [centre(rects.get(source)!), centre(rects.get(target)!)] as const
+  const turn = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number =>
+    Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x))
+  const cross = (p: Pick<AnnotatedRelationship, 'source' | 'target'>, q: Pick<AnnotatedRelationship, 'source' | 'target'>): boolean => {
+    if (p.source === q.source || p.source === q.target || p.target === q.source || p.target === q.target) return false
+    const [a, b] = line(p)
+    const [c, d] = line(q)
+    return turn(a, b, c) * turn(a, b, d) < 0 && turn(c, d, a) * turn(c, d, b) < 0
+  }
+  // Centre lines stand in for routes: their length, and SWAP_CROSSING cells for every pair that crosses.
+  const cost = (ids: readonly string[]): number => [...new Set(ids.flatMap(id => touching.get(id) ?? []))]
+    .filter(({ source, target }) => rects.has(source) && rects.has(target))
+    .reduce((sum, relationship) => {
+      const [a, b] = line(relationship)
+      return sum + Math.abs(a.x - b.x) + Math.abs(a.y - b.y)
+        + SWAP_CROSSING * placed.filter(other => other !== relationship && cross(relationship, other)).length
+    }, 0)
+  // Peers share a zone, or a surface when they are in none, and a size, so a swap never moves one out of its group.
+  const zoneOf = new Map(placement.zones.flatMap(zone => zone.members.map(member => [member, zone.key] as const)))
+  const groups = Map.groupBy(placement.buildings.filter(building => building.kind === 'component'),
+    building => `${zoneOf.get(building.representationId) ?? building.surface}\0${building.rect.w}x${building.rect.d}`)
+  for (const group of groups.values()) {
+    for (let improved = true; improved;) {
+      improved = false
+      for (let i = 0; i < group.length; i += 1) {
+        for (let j = i + 1; j < group.length; j += 1) {
+          const [a, b] = [group[i]!, group[j]!]
+          const ids = [a.representationId, b.representationId]
+          const before = cost(ids)
+          const swap = (): void => {
+            const [ax, ay] = [a.rect.gx, a.rect.gy]
+            a.rect.gx = b.rect.gx; a.rect.gy = b.rect.gy
+            b.rect.gx = ax; b.rect.gy = ay
+          }
+          swap()
+          if (cost(ids) < before - 0.001) improved = true
+          else swap()
+        }
+      }
+    }
+  }
+}
+
 /** Composes weighted container flow while preserving measured connection space. */
 export function composePlacement(
   placement: Placement,
@@ -373,6 +506,8 @@ export function composePlacement(
       shiftX += composeSystem(placement, island.key, relationships)
     }
   }
+  swapPeers(placement, relationships)
+  faceSideIslands(placement, relationships)
   const occupied = unionRects(placement.islands.map(island => island.rect))
   if (occupied) {
     placement.sheet.w = occupied.gx + occupied.w + MARGIN

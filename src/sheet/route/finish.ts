@@ -1,7 +1,7 @@
-import { crossingRouteIdsFor, routesCross, sharedPathMeasure } from './checks.ts'
+import { crossingRouteIdsFor, joinedRoutes, routesCross, sharedPathMeasure } from './checks.ts'
 import { BEND } from './costs.ts'
-import { EPSILON, visibleObstacle, type Endpoint, type FlatRoute, type Point } from './geometry.ts'
-import { BUNDLE_SPACING, ROUTE_CLEARANCE, portStretch } from './space.ts'
+import { EPSILON, foreignLength, visibleObstacle, type Endpoint, type FlatRoute, type Point } from './geometry.ts'
+import { BUNDLE_SPACING, ROUTE_CLEARANCE, ROUTE_UNIT, portStretch } from './space.ts'
 interface RouteEndRun {
   route: FlatRoute
   indices: number[]
@@ -60,7 +60,7 @@ function facingRoutePoints(
   const target = routeEndRun(route, false)
   const sourceEndpoint = endpoints.get(route.source)
   const targetEndpoint = endpoints.get(route.target)
-  if (!source || !target || sourceEndpoint?.kind !== 'building' || targetEndpoint?.kind !== 'building'
+  if (!source || !target || !sourceEndpoint || !targetEndpoint
     || source.slotAxis !== target.slotAxis || endDirection(source) !== -endDirection(target)) return undefined
   const runAxis = source.slotAxis === 'x' ? 'y' : 'x'
   const start = route.points[0]!
@@ -145,18 +145,76 @@ function routeCrossings(route: FlatRoute, routes: readonly FlatRoute[]): number 
   return routes.filter(other => other.id !== route.id && routesCross(route, other)).length
 }
 
+interface FacingWall {
+  at: number
+  low: number
+  high: number
+}
+
+/** The visible walls of an endpoint, each with its fixed coordinate and the stretch it spans, corners kept clear. */
+function wallsOf(endpoint: Endpoint): Record<'north' | 'east' | 'south' | 'west', FacingWall> {
+  const p = visibleObstacle(endpoint)
+  const wall = (at: number, a: number, b: number): FacingWall => {
+    const inset = Math.min(ROUTE_UNIT, Math.abs(b - a) / 2)
+    return { at, low: Math.min(a, b) + inset, high: Math.max(a, b) - inset }
+  }
+  return {
+    north: wall(p[0]!.y, p[0]!.x, p[1]!.x),
+    east: wall(p[2]!.x, p[2]!.y, p[3]!.y),
+    south: wall(p[3]!.y, p[4]!.x, p[3]!.x),
+    west: wall(p[5]!.x, p[0]!.y, p[5]!.y),
+  }
+}
+
+/**
+ * Straight lines between the facing walls of a route's two ends, when those walls overlap: whatever shape the route
+ * took, it may run straight across. It tries first where either end already meets its wall, the port more routes share
+ * first, so a route keeps a port it shares with others; then as near the middle of both walls as the overlap allows.
+ */
+function straightRoutePoints(endpoints: ReadonlyMap<string, Endpoint>, route: FlatRoute, routes: readonly FlatRoute[]): Point[][] {
+  const source = endpoints.get(route.source)
+  const target = endpoints.get(route.target)
+  if (!source || !target || route.points.length <= 2) return []
+  const a = wallsOf(source)
+  const b = wallsOf(target)
+  const facing: [FacingWall, FacingWall, 'x' | 'y'][] = [
+    ...(a.east.at < b.west.at ? [[a.east, b.west, 'y'] as [FacingWall, FacingWall, 'y']] : []),
+    ...(b.east.at < a.west.at ? [[a.west, b.east, 'y'] as [FacingWall, FacingWall, 'y']] : []),
+    ...(a.south.at < b.north.at ? [[a.south, b.north, 'x'] as [FacingWall, FacingWall, 'x']] : []),
+    ...(b.south.at < a.north.at ? [[a.north, b.south, 'x'] as [FacingWall, FacingWall, 'x']] : []),
+  ]
+  for (const [from, to, slotAxis] of facing) {
+    const lower = Math.max(from.low, to.low)
+    const upper = Math.min(from.high, to.high)
+    if (lower > upper + EPSILON) continue
+    const middle = (from.low + from.high + to.low + to.high) / 4
+    // The end whose port more routes share goes first, so a route each way between two boxes picks the same line.
+    const sharing = (end: Point): number => routes.filter(other => [other.points[0]!, other.points.at(-1)!].some(point => same(point, end))).length
+    const ends = [route.points[0]!, route.points.at(-1)!].sort((a, b) => sharing(b) - sharing(a)).map(end => end[slotAxis])
+      .filter(at => at >= lower - EPSILON && at <= upper + EPSILON)
+    const slots = [...new Set([...ends, Math.min(upper, Math.max(lower, middle))])]
+    return slots.map(slot => slotAxis === 'x'
+      ? [{ x: slot, y: from.at }, { x: slot, y: to.at }]
+      : [{ x: from.at, y: slot }, { x: to.at, y: slot }])
+  }
+  return []
+}
+
 export function alignFacingRoutes(
   endpoints: ReadonlyMap<string, Endpoint>,
   routes: FlatRoute[],
 ): void {
   for (const route of routes) {
-    const points = facingRoutePoints(endpoints, route)
-    if (!points) continue
-    const candidate = { ...route, points }
-    const changed = routes.map(other => other.id === route.id ? candidate : other)
-    if (routeCrossings(candidate, changed) <= routeCrossings(route, routes) && safeRoutes(endpoints, changed, [candidate])
-      && keepsSpacing(routes, [route], [candidate])) {
-      route.points = points
+    for (const points of [...straightRoutePoints(endpoints, route, routes), facingRoutePoints(endpoints, route)]) {
+      if (!points) continue
+      const candidate = { ...route, points }
+      const changed = routes.map(other => other.id === route.id ? candidate : other)
+      if (routeCrossings(candidate, changed) <= routeCrossings(route, routes) && safeRoutes(endpoints, changed, [candidate])
+        && foreignLength(endpoints, candidate) <= foreignLength(endpoints, route) + EPSILON
+        && keepsSpacing(routes, [route], [candidate])) {
+        route.points = points
+        break
+      }
     }
   }
 }
@@ -264,6 +322,8 @@ function acceptShortest(
     const candidate = { ...route, points }
     if (crosses([candidate]).length > 0 || routeCrossings(candidate, routes) > crossings) continue
     if (spacing([candidate]) > EPSILON || !keepsSpacing(routes, [route], [candidate])) continue
+    // A shortcut never runs further across an island the route should go round than the route already did.
+    if (foreignLength(endpoints, candidate) > foreignLength(endpoints, route) + EPSILON) continue
     route.points = points
     return
   }
@@ -320,5 +380,44 @@ export function shortenDirect(endpoints: ReadonlyMap<string, Endpoint>, routes: 
       }
     }
     acceptShortest(endpoints, routes, route, candidates)
+  }
+}
+
+/**
+ * Routes that share an end and run side by side a bundle gap apart become one line there: an inner run (never one that
+ * touches a port) moves onto the parallel run of the route it joins, when that adds no crossing and keeps the route
+ * safe and spaced from the others. Nudging spreads the runs of one channel by their own lines, so two routes into one
+ * box could part for a whole stretch and join only at the end.
+ */
+export function mergeJoinedRuns(endpoints: ReadonlyMap<string, Endpoint>, routes: FlatRoute[]): void {
+  for (const route of routes) {
+    for (let index = 1; index + 2 < route.points.length; index += 1) {
+      const [a, b] = [route.points[index]!, route.points[index + 1]!]
+      const vertical = Math.abs(a.x - b.x) < EPSILON
+      const [low, high] = vertical ? [Math.min(a.y, b.y), Math.max(a.y, b.y)] : [Math.min(a.x, b.x), Math.max(a.x, b.x)]
+      const at = vertical ? a.x : a.y
+      for (const other of routes) {
+        if (!joinedRoutes(route, other)) continue
+        const target = other.points.slice(0, -1).flatMap((c, k) => {
+          const d = other.points[k + 1]!
+          if (vertical !== (Math.abs(c.x - d.x) < EPSILON)) return []
+          const there = vertical ? c.x : c.y
+          const [from, to] = vertical ? [Math.min(c.y, d.y), Math.max(c.y, d.y)] : [Math.min(c.x, d.x), Math.max(c.x, d.x)]
+          const gap = Math.abs(there - at)
+          return gap > EPSILON && gap <= BUNDLE_SPACING + EPSILON && Math.min(high, to) - Math.max(low, from) > EPSILON ? [there] : []
+        })[0]
+        if (target === undefined) continue
+        const points = route.points.map((point, k) => k === index || k === index + 1
+          ? (vertical ? { ...point, x: target } : { ...point, y: target }) : point)
+        const candidate = { ...route, points }
+        const changed = routes.map(item => item.id === route.id ? candidate : item)
+        if (routeCrossings(candidate, changed) <= routeCrossings(route, routes) && safeRoutes(endpoints, changed, [candidate])
+          && foreignLength(endpoints, candidate) <= foreignLength(endpoints, route) + EPSILON
+          && keepsSpacing(routes, [route], [candidate])) {
+          route.points = points
+          break
+        }
+      }
+    }
   }
 }

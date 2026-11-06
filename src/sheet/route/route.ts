@@ -6,13 +6,14 @@
 
 import type { Route } from '../types.ts'
 import { crossingRouteIdsFor, sharedPathMeasure } from './checks.ts'
-import { alignFacingRoutes, compactPath, orderBuildingFans, shortenDirect, shortenEnds } from './finish.ts'
-import { EPSILON, type Endpoint, type FlatRoute, type RouteRequest } from './geometry.ts'
+import { alignFacingRoutes, compactPath, mergeJoinedRuns, orderBuildingFans, shortenDirect, shortenEnds } from './finish.ts'
+import { EPSILON, foreignIslands, type Endpoint, type FlatRoute, type RouteRequest } from './geometry.ts'
 import { routeGraph, type Box } from './graph.ts'
 import { nudgeRoutes } from './nudge.ts'
 import { RoutePaths } from './paths.ts'
 import { portChoices, portSpan } from './ports.ts'
 import { ROUTE_UNIT } from './space.ts'
+import { CROSSING, UNTANGLE } from './costs.ts'
 
 export type { Endpoint, RouteRequest } from './geometry.ts'
 
@@ -42,6 +43,7 @@ function drawn(endpoints: ReadonlyMap<string, Endpoint>, requests: readonly Rout
   alignFacingRoutes(endpoints, routes)
   shortenDirect(endpoints, routes)
   shortenEnds(endpoints, routes)
+  mergeJoinedRuns(endpoints, routes)
   // Shortcuts can change the order of ends along a shared wall.
   orderBuildingFans(endpoints, routes)
   return routes
@@ -58,12 +60,23 @@ export function routeAll(endpoints: ReadonlyMap<string, Endpoint>, requests: rea
   const choices = portChoices(endpoints, requests)
   const graph = routeGraph(endpoints, choices)
   const paths = new RoutePaths(graph, choices, requests)
+  const avoid = requests.map(request => foreignIslands(endpoints, request.source, request.target))
+  paths.foreign = (route, x, y) => avoid[route]!.some(island =>
+    x > island.x && x < island.x + island.width && y > island.y && y < island.y + island.height)
+  // People and external systems into one target join each other's outgoing track: they stand in a column and fan into
+  // one trunk, where a lower one could otherwise only thread between another island's buildings.
+  const outside = (index: number) => /^island:(actors|external)$/.test(endpoints.get(requests[index]!.source)?.owner ?? '')
+  paths.joinsTrack = (a, b) => a !== b && outside(a) && outside(b) && requests[a]!.target === requests[b]!.target
   const order = routeOrder(requests)
   for (const index of order) {
     if (!paths.route(index)) throw new Error(`Could not route relationship ${requests[index]!.id}`)
   }
   // Every path once more, now that it can see all the others.
   for (const index of order) paths.improve(index)
+  // Once more with crossings dearer: a route that crosses others takes another way where that costs little.
+  paths.crossing = CROSSING * UNTANGLE
+  for (const index of order) paths.improve(index)
+  paths.crossing = CROSSING
   const routes = drawn(endpoints, requests, paths, graph.boxes)
   const crossings = crossingRouteIdsFor(endpoints)(routes)
   const shared = sharedPathMeasure(routes, new Set(routes.map(route => route.id)))(routes)

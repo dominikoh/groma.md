@@ -40,9 +40,10 @@ interface Constraint {
 
 const movable = (item: Item): boolean => item.run !== undefined
 
-/** Runs of routes that share a source or a target may lie on one line: those routes join there. */
+/** Runs of routes that share an end, in either role, may lie on one line: those routes join there. */
 function joined(ends: readonly { source: RouteEnd, target: RouteEnd }[], a: number, b: number): boolean {
-  return a !== b && (ends[a]!.source.key === ends[b]!.source.key || ends[a]!.target.key === ends[b]!.target.key)
+  const [p, q] = [ends[a]!, ends[b]!]
+  return a !== b && (p.source.key === q.source.key || p.target.key === q.target.key || p.source.key === q.target.key || p.target.key === q.source.key)
 }
 
 /**

@@ -50,7 +50,7 @@ function distanceToEdge(point: Point, from: Point, to: Point): number {
   return Math.hypot(point.x - from.x - fraction * dx, point.y - from.y - fraction * dy)
 }
 
-test.concurrent('additional building ports subdivide the usable edge span without moving toward corners', () => {
+test.concurrent('routes leaving one wall share one port that more routes never move', () => {
   const building = endpoint(tower())
   const initial = portsFor(building, 3)
   const busy = portsFor(building, 12)
@@ -59,13 +59,12 @@ test.concurrent('additional building ports subdivide the usable edge span withou
     const coordinates = (ports: typeof initial) => ports.filter(port => port.side === side).map(port => port.wall[axis])
     const before = coordinates(initial)
     const after = coordinates(busy)
-    assert.equal(new Set(after).size, 12)
-    assert.equal(Math.min(...after), Math.min(...before))
-    assert.equal(Math.max(...after), Math.max(...before))
+    assert.equal(new Set(after).size, 1)
+    assert.deepEqual(new Set(after), new Set(before))
   }
 })
 
-test.concurrent('busy stepped-tower ports meet visible faces with distinct tips clear of their corners', () => {
+test.concurrent('busy stepped-tower ports meet visible faces clear of their corners, one tip per wall', () => {
   const building = tower()
   const ports = portsFor(endpoint(building), 12)
   const cell = (point: Point) => ({ gx: point.x / ROUTE_UNIT, gy: point.y / ROUTE_UNIT })
@@ -86,7 +85,7 @@ test.concurrent('busy stepped-tower ports meet visible faces with distinct tips 
     assert.ok(faces.every(face => face.points.every(point =>
       Math.hypot(point.x - arrow.at.x, point.y - arrow.at.y) > 1e-8)), `${route.id} meets a corner`)
   }
-  assert.equal(new Set(projected.routes.map(route => JSON.stringify(route.arrow.at))).size, ports.length)
+  assert.equal(new Set(projected.routes.map(route => JSON.stringify(route.arrow.at))).size, 4)
   assert.deepEqual(scene, original)
 })
 

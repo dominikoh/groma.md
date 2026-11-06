@@ -1,5 +1,5 @@
 import { centredRect } from '../../../../sheet/grid.ts'
-import { CONTAINER_FONT, GROUP_FONT, ISLAND_FONT, ISLAND_SPACING, PLANE, buildingFont, curved, labelBand, roofBlock, textWidth } from '../../../../sheet/measure.ts'
+import { CONTAINER_FONT, GROUP_FONT, ISLAND_FONT, ISLAND_SPACING, PLANE, buildingFont, curved, labelBand, roofBlock, slabBand, textWidth } from '../../../../sheet/measure.ts'
 import type {
   Building,
   CellRect,
@@ -93,6 +93,8 @@ export interface SurfaceText {
 /** A surface name centered below its boundary, with room for a leader on the same plane. */
 export interface SurfaceLabel extends SurfaceText {
   width: number
+  /** Laid inside the surface's own box (an empty container) rather than in a band below it: no leader. */
+  inside?: true
   /** Reserved plane-space envelope below the painted boundary; labels may not escape it. */
   band: { width: number; height: number }
 }
@@ -366,6 +368,18 @@ function bandText(rect: CellRect, lines: string[], size: number, view: Projectio
   }
 }
 
+/** A label laid inside an empty surface's box, centred where its band would otherwise sit below. */
+function insideText(rect: CellRect, lines: string[], size: number, view: ProjectionView): SurfaceLabel {
+  const width = Math.max(...lines.map(line => textWidth(line, size)))
+  return {
+    origin: project(rect.gx + (rect.w - width / PLANE) / 2, rect.gy + (rect.d - labelBand(size)) / 2, 0, view),
+    lines,
+    width,
+    band: { width: rect.w * PLANE, height: labelBand(size) * PLANE },
+    inside: true,
+  }
+}
+
 export function boundsOf(points: readonly Point[]): Bounds {
   if (points.length === 0) return { x: 0, y: 0, width: 1, height: 1 }
   let minX = Infinity
@@ -399,8 +413,8 @@ export function projectScene(
   }))
   const slabs = paintOrder(scene.slabs, view).map(slab => ({
     slab,
-    faces: boxFaces(surfaceBody(slab.rect, CONTAINER_FONT), -SLAB_HANG / HEIGHT_UNIT, 0, view),
-    text: bandText(slab.rect, [slab.title], CONTAINER_FONT, view),
+    faces: boxFaces({ ...slab.rect, d: slab.rect.d - slabBand(slab) }, -SLAB_HANG / HEIGHT_UNIT, 0, view),
+    text: slab.empty ? insideText(slab.rect, [slab.title], CONTAINER_FONT, view) : bandText(slab.rect, [slab.title], CONTAINER_FONT, view),
   }))
   const buildings = paintOrder(scene.buildings, view).map(building => ({
     building,

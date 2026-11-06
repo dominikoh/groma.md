@@ -1,4 +1,4 @@
-import { EPSILON, visibleObstacle, type Endpoint, type Point, type PortSide } from './geometry.ts'
+import { EPSILON, isObstacle, visibleObstacle, type Endpoint, type Point, type PortSide } from './geometry.ts'
 import type { PortChoices } from './ports.ts'
 import { BUNDLE_SPACING, ROUTE_CLEARANCE, ROUTE_SPACING } from './space.ts'
 
@@ -28,6 +28,8 @@ interface Line {
   to: number
   /** A port's track belongs to the routes that may use the port; others may cross it but not run along it. Channel lines are public. */
   owners?: number[]
+  /** The owners whose route leaves by this track's port, so routes into the same target may join it. */
+  leaving?: number[]
 }
 
 /**
@@ -49,6 +51,8 @@ export interface RouteGraph {
   beside: (number[] | undefined)[]
   /** The routes allowed along a port's private edges, by the same index; other edges are public. */
   owners: (number[] | undefined)[]
+  /** The owners that leave by an edge's port track, by the same index. */
+  leaving: (number[] | undefined)[]
   /** The straight line each edge lies on, by the same index, so routes sharing a line can be compared along it. */
   line: Int32Array
   /** Guard node of every port choice of each request, in the order of its choices. */
@@ -59,7 +63,7 @@ export interface RouteGraph {
 export const exitDirection: Record<PortSide, number> = { east: EAST, south: SOUTH, west: WEST, north: NORTH }
 
 function clearanceBoxes(endpoints: ReadonlyMap<string, Endpoint>): Box[] {
-  return [...endpoints.values()].filter(endpoint => endpoint.kind === 'building').map(endpoint => {
+  return [...endpoints.values()].filter(isObstacle).map(endpoint => {
     const polygon = visibleObstacle(endpoint, ROUTE_CLEARANCE)
     const xs = polygon.map(point => point.x)
     const ys = polygon.map(point => point.y)
@@ -149,14 +153,14 @@ function reachAlong(along: number, across: number, forward: boolean, boxes: read
 }
 
 /** A guard's track runs straight out of its wall until the next box or the bounds. */
-function portRay(guard: Point, direction: number, boxes: readonly Box[], bounds: Box, owners: number[]): Line {
+function portRay(guard: Point, direction: number, boxes: readonly Box[], bounds: Box, owners: number[], leaving: number[]): Line {
   const horizontal = direction === EAST || direction === WEST
   const forward = direction === EAST || direction === SOUTH
   const frame = horizontal ? bounds : transposed(bounds)
   const along = horizontal ? guard.x : guard.y
   const across = horizontal ? guard.y : guard.x
   const end = reachAlong(along, across, forward, horizontal ? boxes : boxes.map(transposed), forward ? frame.x1 : frame.x0)
-  return { horizontal, at: across, from: Math.min(along, end), to: Math.max(along, end), owners }
+  return { horizontal, at: across, from: Math.min(along, end), to: Math.max(along, end), owners, leaving }
 }
 
 /** The far end of a port's track. */
@@ -191,6 +195,7 @@ function merged(lines: readonly Line[]): Line[] {
       if (current && line.from <= current.to + EPSILON) {
         current.to = Math.max(current.to, line.to)
         current.owners = current.owners && line.owners ? [...current.owners, ...line.owners] : undefined
+        current.leaving = current.leaving && line.leaving ? [...current.leaving, ...line.leaving] : undefined
       } else {
         current = { ...line }
         result.push(current)
@@ -281,17 +286,22 @@ interface Guard {
   side: PortSide
   /** The requests with a port choice here. */
   owners: number[]
+  /** The requests among them that leave by this port. */
+  leaving: number[]
 }
 
 /** Every distinct guard of the port choices, with the requests that may use it. */
 function guardsOf(choices: readonly PortChoices[]): Guard[] {
   const guards = new Map<string, Guard>()
   for (const [index, request] of choices.entries()) {
-    for (const { port } of [...request.source, ...request.target]) {
-      const key = `${stable(port.guard.x)},${stable(port.guard.y)},${port.side}`
-      const guard = guards.get(key)
-      if (!guard) guards.set(key, { point: port.guard, side: port.side, owners: [index] })
-      else if (guard.owners.at(-1) !== index) guard.owners.push(index)
+    for (const [end, leaves] of [[request.source, true], [request.target, false]] as const) {
+      for (const { port } of end) {
+        const key = `${stable(port.guard.x)},${stable(port.guard.y)},${port.side}`
+        const guard = guards.get(key) ?? { point: port.guard, side: port.side, owners: [], leaving: [] }
+        guards.set(key, guard)
+        if (guard.owners.at(-1) !== index) guard.owners.push(index)
+        if (leaves && guard.leaving.at(-1) !== index) guard.leaving.push(index)
+      }
     }
   }
   return [...guards.values()]
@@ -310,7 +320,7 @@ export function routeGraph(endpoints: ReadonlyMap<string, Endpoint>, choices: re
   const vertical = channelLines(boxes, bounds)
   const horizontal = channelLines(boxes.map(transposed), transposed(bounds)).map(line => ({ ...line, horizontal: true }))
   const channels = [...vertical, ...horizontal]
-  const rays = guards.map(guard => portRay(guard.point, exitDirection[guard.side], boxes, bounds, guard.owners))
+  const rays = guards.map(guard => portRay(guard.point, exitDirection[guard.side], boxes, bounds, guard.owners, guard.leaving))
   const connectors = rays.flatMap((ray, index) => channels.some(channel => channel.horizontal !== ray.horizontal && crosses(ray, channel))
     ? [] : [crossLine(trackEnd(ray, exitDirection[guards[index]!.side]), !ray.horizontal, boxes, bounds)])
   const lines = merged([...channels, ...rays, ...connectors])
@@ -369,7 +379,7 @@ function lineStops(lines: readonly Line[], guards: readonly Point[], nodes: Node
 }
 
 /** The per-edge tables of the graph that linking the lines fills in, indexed like `RouteGraph`. */
-type Links = Pick<RouteGraph, 'next' | 'capacity' | 'comfort' | 'owners' | 'line'>
+type Links = Pick<RouteGraph, 'next' | 'capacity' | 'comfort' | 'owners' | 'leaving' | 'line'>
 
 /** Links consecutive stops along every line and measures the channel around each edge. */
 function linkLines(stops: Map<Line, number[]>, nodes: Nodes, boxes: readonly Box[], bounds: Box): Omit<RouteGraph, 'x' | 'y' | 'ends' | 'boxes'> {
@@ -379,6 +389,7 @@ function linkLines(stops: Map<Line, number[]>, nodes: Nodes, boxes: readonly Box
     capacity: new Uint16Array(slots),
     comfort: new Uint16Array(slots),
     owners: new Array(slots).fill(undefined),
+    leaving: new Array(slots).fill(undefined),
     line: new Int32Array(slots).fill(-1),
   }
   const strips = [new Strips(boxes, true, bounds), new Strips(boxes, false, bounds)]
@@ -405,6 +416,7 @@ function linkLine(line: Line, number: number, ids: readonly number[], nodes: Nod
     links.capacity[slot] = lanes([line.at - half, line.at + half])
     links.comfort[slot] = lanes([line.at - half, line.at + half], BUNDLE_SPACING)
     links.owners[slot] = line.owners
+    links.leaving[slot] = line.leaving
     links.line[slot] = number
     edges.push({ slot, horizontal: line.horizontal, from: along[from]!, to: along[to]!, free })
   }
