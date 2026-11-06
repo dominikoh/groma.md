@@ -1,0 +1,53 @@
+{
+  "name": "@groma/scanner-elixir",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "license": "MIT",
+  "description": "Experimental Elixir declarations, code outlines, OTP application entries and alias-resolved call evidence.",
+  "groma": {
+    "scanner": {
+      "id": "elixir",
+      "entry": "./src/index.ts",
+      "include": [
+        "**/*.ex",
+        "**/mix.exs"
+      ],
+      "exclude": [
+        "deps/",
+        "_build/",
+        "cover/",
+        "test/",
+        "priv/",
+        ".elixir_ls/"
+      ],
+      "discovery": {
+        "technologies": [
+          "elixir"
+        ],
+        "rules": [
+          {
+            "type": "file",
+            "files": [
+              "**/mix.exs",
+              "**/*.ex"
+            ],
+            "technology": "elixir",
+            "kind": "language",
+            "declaration": "Elixir source files"
+          }
+        ],
+        "compatibility": {
+          "groma": ">=0.6.6"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@groma/scanner": "workspace:*",
+    "web-tree-sitter": "0.27.1"
+  },
+  "devDependencies": {
+    "tree-sitter-elixir": "0.3.5"
+  }
+}

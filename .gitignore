@@ -5,6 +5,7 @@ node_modules/
 /dist/
 /npm-release/
 /plugins/scanners/typescript/dist/
+/plugins/scanners/elixir/dist/
 /test/fixtures/csharp-operations/**/obj/
 /plugins/scanners/scala/worker/**/target/
 /plugins/scanners/scala/worker/project/project/
