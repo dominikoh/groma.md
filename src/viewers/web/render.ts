@@ -120,6 +120,10 @@ const pins = createPins(host, id => map.anchorOf(id), tip, id => {
   paintViewState()
 })
 const island = createWorkIsland(host, pins.show, tip)
+/** Task pins on drawn elements, none while the Tasks filter is off. */
+function mapPins() {
+  return filterC4.hidden.has('task') ? [] : currentPins.filter(pin => map.anchorOf(pin.elementId) !== undefined)
+}
 const hierarchy = createHierarchy(treeHost, select)
 const themeControl = bindThemeControl(document.getElementById('theme') as HTMLDetailsElement, opened.theme, syncUrl)
 let hudVisible = opened.hudVisible
@@ -133,6 +137,8 @@ if (boot.revision === null && selection.kind === 'none' && initial !== undefined
 selection = retainSelection(selection, id => world.elements.some(element => element.representationId === id))
 /** Tasks activated from pins or chips, in activation order; selection is independent and this order supplies its deactivation fallback. */
 let activeTaskIds: string[] = selection.kind === 'task' ? [selection.id] : []
+/** The element whose Tasks list opened the selected task, so its summary can go back there. */
+let taskOrigin: string | undefined
 let detailsTab: DetailsTab = opened.tab
 const revisionControl = createRevisionControl({
   box: revisionBox, body: document.body, boot, data,
@@ -155,6 +161,13 @@ const review = createProjectReview({ world: () => world, revision: () => revisio
 const taskDiff = createTaskDiffControl({
   host: detailsHost, world: () => world, readDetails: data.readTask, readDiff: data.readTaskDiff,
   repaint: paintViewState, select,
+  back: () => taskOrigin === undefined ? undefined : () => {
+    const origin = taskOrigin!
+    activeTaskIds = []
+    select(origin)
+    detailsTab = 'tasks'
+    paintViewState()
+  },
 })
 const viewport = (): MapFrame => measureFrame(hosts, hudVisible)
 emptyState.paint(fullPayload.world, project, !revisionControl.live) // Before the first fit; a published view hides the page's notice.
@@ -268,7 +281,11 @@ function paintDetailsState(task: WorkItem | undefined): void {
       code: detailsTab === 'how' && revisionControl.comparison === undefined ? source.code() : [],
       onSource: source.open,
       workGroups: selected === undefined ? [] : selectedWorkGroups(selected.representationId),
-      onTask: toggleTask,
+      onTask: id => {
+        toggleTask(id)
+        taskOrigin = selection.kind === 'task' && selected !== undefined ? selected.representationId : undefined
+        paintViewState()
+      },
       ...(selected === undefined ? {} : authoring.paneWrites(selected.id, selectedArchitecture(selection))),
     })
   }
@@ -276,6 +293,7 @@ function paintDetailsState(task: WorkItem | undefined): void {
 
 function select(id: string, additive = false, origin: 'panel' | 'map' = 'panel'): void {
   if (worldElement(id) === undefined && worldRelationship(id) === undefined && unidentifiedGroup(id) === undefined) return
+  taskOrigin = undefined
   source.clear()
   const next = origin === 'map' ? selectMapArchitecture(selection, id, additive, world)
     : selectArchitecture(selection, id, additive)
@@ -301,6 +319,7 @@ function focusArchitecture(ids: readonly string[]): void {
 
 /** Task pins preserve the camera; panel and search selections bring active work into view. */
 function applyTaskSelection(next: ReturnType<typeof toggleWorkSelection>, focus = true): void {
+  taskOrigin = undefined
   activeFlows = []
   activeTaskIds = next.active
   source.clear()
@@ -316,6 +335,7 @@ function toggleTask(id: string, focus = true): void {
 }
 
 function deselect(): void {
+  taskOrigin = undefined
   authoring.cancel()
   source.clear()
   selection = noSelection
@@ -430,7 +450,7 @@ function repaintScene(fit: boolean): void {
   paintMapView(mapMotion.view)
   const rehighlight = debug.paint(() => map.paint(scene))
   routeLabels.paint(scene)
-  pins.paint(currentPins.filter(pin => map.anchorOf(pin.elementId) !== undefined))
+  pins.paint(mapPins())
   const fitted = camera.refitTo(frame)
   if (fit && (mapMotion.morphing || following)) {
     if (!camera.touched) camera.frame(fitted, 1)
@@ -522,7 +542,7 @@ function applyWork(payload: WebWorkPayload): void {
   detailsTab = detailsTabAfterWork(detailsTab, hasTasks)
   activeTaskIds = activeTaskIds.filter(id => workItem(id) !== undefined)
   selection = retainSelection(selection, id => known(id))
-  pins.paint(currentPins.filter(pin => map.anchorOf(pin.elementId) !== undefined))
+  pins.paint(mapPins())
   island.paint(payload.pins, work)
   paintViewState()
   searchControl.updateTasks(work.items)
@@ -533,7 +553,7 @@ function paintWorld(): void {
   routeLabels.paint(scene)
   revisionControl.paintProjectEdit(map.svg)
   authoring.refresh()
-  pins.paint(currentPins.filter(pin => map.anchorOf(pin.elementId) !== undefined))
+  pins.paint(mapPins())
   island.paint(currentPins, work)
   camera.paint()
   paintViewState()

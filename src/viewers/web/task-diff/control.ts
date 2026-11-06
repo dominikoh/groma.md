@@ -15,6 +15,8 @@ interface TaskDiffControlOptions {
   readDiff(id: string): Promise<TaskDiffPayload>
   repaint(): void
   select(id: string, additive: boolean): void
+  /** Returns to the task list the selected task was opened from, when there is one. */
+  back(): (() => void) | undefined
 }
 
 function diffKey(item: WorkItem): string {
@@ -145,6 +147,7 @@ export function createTaskDiffControl(options: TaskDiffControlOptions): TaskDiff
           error,
           options.select,
           open,
+          options.back(),
         )
       }
       return true

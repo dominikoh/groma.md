@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { loadAnnotatedArchitecture } from '../src/core.ts'
 import { sheetScene } from '../src/sheet/scene.ts'
 import type { C4Kind } from '../src/types.ts'
-import { filterC4Scene } from '../src/viewers/web/chrome/c4-filter.ts'
+import { filterC4Scene, readHiddenFilters } from '../src/viewers/web/chrome/c4-filter.ts'
 import { presentScene } from '../src/viewers/web/iso/view-motion/presentation.ts'
 import { EXPLODED_POSE, NESTED_POSE, OVERHEAD_POSE } from '../src/viewers/web/iso/view-motion/orbit.ts'
 import { viewerFixtureRoot } from './helpers.ts'
@@ -84,4 +84,11 @@ test.concurrent('relationships toggle independently and restore only routes allo
     expect(filterC4Scene(scene, hidden)).toBe(scene)
     hidden.add('relationship')
   }
+})
+
+test.concurrent('the Tasks filter is read from the URL and leaves the map scene as it is', async () => {
+  expect([...readHiddenFilters('task,relationship,unknown')].sort()).toEqual(['relationship', 'task'])
+  const world = await loadAnnotatedArchitecture(viewerFixtureRoot)
+  const scene = presentScene(sheetScene(world), undefined, NESTED_POSE)
+  expect(filterC4Scene(scene, new Set(['task']))).toEqual(scene)
 })

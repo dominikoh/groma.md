@@ -1,3 +1,4 @@
+import { chromeButton } from '../atoms/button.ts'
 import type { ArchitectureGraph, C4Kind, WorkItem, WorkItemDetails } from '../../../types.ts'
 import { sourceIndex } from '../../../source-index.ts'
 import { updateTaskSummary, updateTaskText } from './updates.ts'
@@ -111,13 +112,16 @@ export function paintTaskSummary(
   error: string | undefined,
   onSelect: (id: string, additive: boolean) => void,
   onOpen: (file: string) => void,
+  onBack?: () => void,
 ): void {
   leaveFileDiff(host)
   const index = sourceIndex(world.elements)
   const continuing = host.querySelector<HTMLElement>('.task-summary')?.dataset.taskId === item.id
   updateTaskText(host.querySelector('h1')!, item.title, continuing)
   updateTaskText(host.querySelector('.meta')!, [item.id, item.status, ...item.assignees].join(' · '), continuing)
-  host.querySelector('.tabs')!.replaceChildren()
+  const back = onBack === undefined ? [] : [chromeButton('Back', { glyph: '←', ariaLabel: 'Back to tasks' })]
+  back[0]?.addEventListener('click', onBack!)
+  host.querySelector('.tabs')!.replaceChildren(...back)
   const body = document.createElement('div')
   body.className = 'task-summary'
   body.dataset.taskId = item.id
