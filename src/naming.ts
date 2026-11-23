@@ -16,8 +16,11 @@ const MAX_ID_BYTES = 160
 export function fitId(id: string): string {
   if (Buffer.byteLength(id) <= MAX_ID_BYTES) return id
   const hash = createHash('sha256').update(id).digest('hex').slice(0, 8)
-  let start = id
-  while (Buffer.byteLength(start) > MAX_ID_BYTES - hash.length - 1) start = start.slice(0, -1)
+  let start = ''
+  for (const character of id) {
+    if (Buffer.byteLength(start + character) > MAX_ID_BYTES - hash.length - 1) break
+    start += character
+  }
   return `${start.replace(/-+$/, '')}-${hash}`
 }
 
