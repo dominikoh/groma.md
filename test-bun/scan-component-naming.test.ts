@@ -196,3 +196,13 @@ test.concurrent('scanned IDs never take a word the CLI reads as an address, and 
     expect((await reconcileScanObservations(root, [scan])).created).toBe(0)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('deep component ids stay under the file name limit and stay distinct', () => {
+  const deep = Array.from({ length: 12 }, (_, index) => `view-selection-detail-ref-${index}`).join('/')
+  const files = [`a/${deep}/item.component.ts`, `b/${deep}/item.component.ts`]
+  const result = names(files)
+  const ids = files.map(file => result.get(file)!.id)
+  expect(new Set(ids).size).toBe(2)
+  for (const id of ids) expect(Buffer.byteLength(`${id}.md.${'x'.repeat(36)}.tmp`)).toBeLessThan(255)
+  expect(names(files)).toEqual(result)
+})
